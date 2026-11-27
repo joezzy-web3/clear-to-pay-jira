@@ -15,7 +15,6 @@ function Admin() {
   const on = st.settings.demoMode;
   return (
     <Stack space="space.200">
-      <Heading as="h2">Clear to Pay settings</Heading>
       {err ? <SectionMessage appearance="error"><Text>{err}</Text></SectionMessage> : null}
       <Heading as="h4">Demo mode</Heading>
       <Text>A changed payout account must normally wait at least 24 hours before anyone can be paid. Demo mode allows a 2-minute hold so you can try the whole flow in one sitting.</Text>
