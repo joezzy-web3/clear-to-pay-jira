@@ -171,7 +171,7 @@ function App() {
             <Lozenge appearance={s.paid ? 'success' : s.decision.verdict === 'CLEARED' ? 'success' : 'moved'} isBold>{s.paid ? 'Cleared to pay' : s.decision.verdict === 'CLEARED' ? 'Ready: would clear' : 'Held until the checks pass'}</Lozenge>
             <Text>{String(s.qty)} × {s.item} at {s.unitPrice} {s.currency} · total {s.orderTotal} {s.currency}</Text>
           </Inline>
-          {s.holdHours < 24 ? <Lozenge appearance="new">Demo mode: {s.holdHours < 1 ? `${Math.round(s.holdHours * 60)}-minute` : `${s.holdHours}-hour`} payout hold</Lozenge> : null}
+          {s.holdHours < 24 ? <Lozenge appearance="new">Demo mode</Lozenge> : null}
           <Progress s={s} />
           <Text>You are: <Strong>{s.roles.length ? s.roles.map((r) => ({ buyer: 'the buyer', receiver: 'the receiver', rep: 'the supplier’s rep', supplier: 'the supplier' })[r]).join(' and ') : 'viewing only'}</Strong></Text>
           <Inline space="space.200"><Text>Supplier</Text><User accountId={s.people.supplier} /><Text>Receiver</Text><User accountId={s.people.receiver} /><Text>Rep</Text><User accountId={s.people.rep} /></Inline>
