@@ -8,7 +8,7 @@ import { invoke } from '@forge/bridge';
 const card = xcss({ padding: 'space.150', borderRadius: 'border.radius.200', backgroundColor: 'elevation.surface.sunken' });
 const when = (ms) => (ms ? new Date(ms).toLocaleString() : '');
 
-function Setup({ run }) {
+function Setup({ run, demoMode }) {
   const [f, setF] = useState({ currency: 'USD', holdHours: '72' });
   const set = (k) => (v) => setF((o) => ({ ...o, [k]: v }));
   return (
@@ -26,7 +26,8 @@ function Setup({ run }) {
       <UserPicker label="Supplier’s rep (counts at the gate for the supplier)" name="rep" onChange={(u) => set('rep')(u?.id)} />
       <Label labelFor="hold">Payout account hold</Label>
       <Select id="hold" defaultValue={{ label: '72 hours (recommended)', value: '72' }} onChange={(o) => set('holdHours')(o.value)}
-        options={[{ label: '72 hours (recommended)', value: '72' }, { label: '24 hours', value: '24' }, { label: '2 minutes (demo only)', value: String(2 / 60) }]} />
+        options={[{ label: '72 hours (recommended)', value: '72' }, { label: '24 hours', value: '24' }, ...(demoMode ? [{ label: '2 minutes (demo mode)', value: String(2 / 60) }] : [])]} />
+      {demoMode ? <Text>Demo mode is on for this site, so a 2-minute hold is allowed for testing.</Text> : null}
       <Button appearance="primary" onClick={() => run('setup', f)}>Set up order</Button>
     </Stack>
   );
@@ -75,6 +76,7 @@ function Invoice({ s, attachments, run }) {
             {!s.duplicate.confirmed && s.roles.includes('buyer') && !s.paid ? <Button onClick={() => run('confirmSeparate')}>It is a separate invoice</Button> : null}
           </SectionMessage>
         ) : null}
+        {s.overDelivered ? <Text>{String(s.overDelivered)} more were counted than ordered. Only what was ordered is payable here; raise a change order for the extra.</Text> : null}
         {s.expected ? <Text>The counted delivery is worth <Strong>{s.expected} {s.currency}</Strong>. The invoice must ask for exactly that.</Text> : null}
         {canEdit ? (
           <Inline space="space.100" alignBlock="end">
@@ -163,12 +165,13 @@ function App() {
     <Stack space="space.200">
       {err ? <SectionMessage appearance="error"><Text>{err}</Text></SectionMessage> : null}
       {done ? <SectionMessage appearance={done.startsWith('Held') ? 'warning' : 'success'}><Text>{done}</Text></SectionMessage> : null}
-      {!s.exists ? <Setup run={run} /> : (
+      {!s.exists ? <Setup run={run} demoMode={st.settings?.demoMode} /> : (
         <Stack space="space.150">
           <Inline space="space.100" alignBlock="center">
             <Lozenge appearance={s.paid ? 'success' : s.decision.verdict === 'CLEARED' ? 'success' : 'moved'} isBold>{s.paid ? 'Cleared to pay' : s.decision.verdict === 'CLEARED' ? 'Ready: would clear' : 'Held until the checks pass'}</Lozenge>
             <Text>{String(s.qty)} × {s.item} at {s.unitPrice} {s.currency} · total {s.orderTotal} {s.currency}</Text>
           </Inline>
+          {s.holdHours < 24 ? <Lozenge appearance="new">Demo mode: {s.holdHours < 1 ? `${Math.round(s.holdHours * 60)}-minute` : `${s.holdHours}-hour`} payout hold</Lozenge> : null}
           <Progress s={s} />
           <Text>You are: <Strong>{s.roles.length ? s.roles.map((r) => ({ buyer: 'the buyer', receiver: 'the receiver', rep: 'the supplier’s rep', supplier: 'the supplier' })[r]).join(' and ') : 'viewing only'}</Strong></Text>
           <Inline space="space.200"><Text>Supplier</Text><User accountId={s.people.supplier} /><Text>Receiver</Text><User accountId={s.people.receiver} /><Text>Rep</Text><User accountId={s.people.rep} /></Inline>

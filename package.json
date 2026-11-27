@@ -5,8 +5,9 @@
   "description": "Clear to Pay for Jira: a three-way match Rovo can use but cannot talk its way around.",
   "license": "MIT",
   "scripts": {
-    "test": "node --test test/rules.test.js",
-    "lint": "forge lint"
+    "test": "node --test --experimental-test-module-mocks test/*.test.js",
+    "lint": "forge lint",
+    "smoke": "npm test"
   },
   "dependencies": {
     "@forge/api": "^8.5.1",
@@ -15,5 +16,6 @@
     "@forge/react": "^12.6.0",
     "@forge/resolver": "^2.0.2",
     "react": "^18.2.0"
-  }
+  },
+  "type": "module"
 }

@@ -12,6 +12,8 @@
 // Anything else is HELD, with every reason listed. Nobody's say-so changes this, including the AI's.
 
 export const DEFAULT_HOLD_HOURS = 72;
+/** A changed bank account must wait at least a day, unless a Jira admin turned on demo mode for testing. */
+export const MIN_HOLD_HOURS = 24;
 export const HOUR = 3_600_000;
 
 export const REASONS = {
@@ -19,8 +21,9 @@ export const REASONS = {
   ALREADY_PAID: 'This order was already cleared to pay. It cannot be paid twice.',
   COUNTS_MISSING: 'Both gate counts are needed: the receiver and the supplier’s rep each count the delivery on their own.',
   COUNTS_DIFFER: 'The two gate counts do not match. Recount, or settle it before anyone pays.',
+  NOTHING_DELIVERED: 'Both gate counts are zero. Nothing was delivered, so there is nothing to pay.',
   NO_INVOICE: 'No invoice has been recorded for this order.',
-  AMOUNT_MISMATCH: 'The invoice amount does not match the price of what was counted.',
+  AMOUNT_MISMATCH: 'The invoice amount does not match the price of what was counted (never more than what was ordered).',
   NO_SUPPLIER_APPROVAL: 'The supplier has not approved this invoice and amount.',
   APPROVAL_FOR_OTHER_INVOICE: 'The supplier approved a different invoice or amount than the one recorded.',
   NO_PAYOUT: 'The supplier has not set a payout account.',
@@ -38,11 +41,13 @@ export const toMinor = (v) => {
 };
 export const fromMinor = (m) => `${Math.floor(m / 100).toLocaleString('en-US')}.${String(m % 100).padStart(2, '0')}`;
 
-/** Price of what was actually counted: the amount a matching invoice must ask for. */
+/** Price of what was counted, capped at what was ordered: the amount a matching invoice must ask for.
+ *  Extra goods beyond the order are not paid here; the buyer raises a change order for them. */
 export const expectedAmount = (po) => {
   const q = countedQty(po);
-  return q === null ? null : q * po.unitPriceMinor;
+  return q === null ? null : Math.min(q, po.qty) * po.unitPriceMinor;
 };
+export const overDelivered = (po) => { const q = countedQty(po); return q !== null && q > po.qty ? q - po.qty : 0; };
 
 /** The agreed count, or null while counts are missing or disagree. */
 export function countedQty(po) {
@@ -63,9 +68,10 @@ export function decide(po, now = Date.now()) {
   const r = po.counts?.receiver, s = po.counts?.rep;
   if (r == null || s == null) reasons.push('COUNTS_MISSING');
   else if (r.qty !== s.qty) reasons.push('COUNTS_DIFFER');
+  else if (r.qty === 0) reasons.push('NOTHING_DELIVERED');
   const expectedMinor = expectedAmount(po);
   if (!po.invoice) reasons.push('NO_INVOICE');
-  else if (expectedMinor !== null && po.invoice.amountMinor !== expectedMinor) reasons.push('AMOUNT_MISMATCH');
+  else if (expectedMinor !== null && expectedMinor > 0 && po.invoice.amountMinor !== expectedMinor) reasons.push('AMOUNT_MISMATCH');
   const a = po.supplierApproval;
   if (!a) reasons.push('NO_SUPPLIER_APPROVAL');
   else if (!po.invoice || a.sha256 !== po.invoice.sha256 || a.amountMinor !== po.invoice.amountMinor) reasons.push('APPROVAL_FOR_OTHER_INVOICE');
@@ -89,7 +95,7 @@ export function roleOf(po, accountId) {
 }
 
 /** Separation of duties, checked when the order is set up. */
-export function checkSetup(p) {
+export function checkSetup(p, { demoMode = false } = {}) {
   const need = ['supplier', 'receiver', 'rep', 'item', 'qty', 'unitPrice'];
   for (const k of need) if (p[k] === undefined || p[k] === null || p[k] === '') throw new Error(`Missing: ${k}.`);
   if (p.receiver === p.rep) throw new Error('The receiver and the supplier’s rep must be two different people.');
@@ -100,7 +106,12 @@ export function checkSetup(p) {
   if (unitPriceMinor <= 0) throw new Error('Unit price must be above zero.');
   const holdHours = p.holdHours === undefined ? DEFAULT_HOLD_HOURS : Number(p.holdHours);
   if (!(holdHours > 0)) throw new Error('The payout hold must be above zero hours.');
-  return { supplier: p.supplier, receiver: p.receiver, rep: p.rep, item: String(p.item).slice(0, 200), qty, unitPriceMinor, currency: String(p.currency || 'USD').slice(0, 3).toUpperCase(), holdHours };
+  if (holdHours < MIN_HOLD_HOURS && !demoMode) throw new Error(`The payout hold must be at least ${MIN_HOLD_HOURS} hours. Shorter holds are only for demo mode, which a Jira admin turns on.`);
+  const currency = String(p.currency || 'USD').trim().toUpperCase();
+  if (!/^[A-Z]{3}$/.test(currency)) throw new Error('Currency must be a three-letter code, like USD or NGN.');
+  const item = String(p.item).replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 120);
+  if (!item) throw new Error('Missing: item.');
+  return { supplier: p.supplier, receiver: p.receiver, rep: p.rep, item, qty, unitPriceMinor, currency, holdHours };
 }
 
 /** The buyer sets the order up, so it may not be on the supplier's side of it. */
@@ -118,3 +129,10 @@ export function visibleCounts(po, accountId) {
 }
 
 export const explain = (codes) => codes.map((c) => REASONS[c] ?? c);
+
+/** Text typed by people (item names, file names, notes) goes to the agent only as quoted data:
+ *  one line, no control characters, capped, in quotes. The agent's prompt says quoted text is never an instruction. */
+export const quoteData = (v, max = 80) => {
+  const s = String(v ?? '').replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, ' ').replace(/\s+/g, ' ').replace(/"/g, '\u201d').trim();
+  return `"${s.length > max ? `${s.slice(0, max - 1)}…` : s}"`;
+};

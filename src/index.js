@@ -2,14 +2,14 @@
 // also exposed as MCP tools. They all go through service.js and the rules in rules.js.
 import Resolver from '@forge/resolver';
 import * as svc from './service.js';
-import { decide, explain, fromMinor, expectedAmount } from './rules.js';
+import { decide, explain, fromMinor, expectedAmount, quoteData } from './rules.js';
 
 const resolver = new Resolver();
 const issueOf = (req) => { const k = req.context.extension?.issue?.key; if (!k) throw new svc.UserError('Open this from a Jira issue.'); return k; };
 const wrap = (fn) => async (req) => {
   try { return { ok: true, ...(await fn(req)) }; } catch (e) { return { ok: false, error: e instanceof svc.UserError ? e.message : 'Something went wrong. Try again.' }; }
 };
-const state = async (key, accountId) => ({ state: svc.view(await svc.load(key), accountId), attachments: await svc.attachments(key) });
+const state = async (key, accountId) => ({ state: svc.view(await svc.load(key), accountId), attachments: await svc.attachments(key), settings: { demoMode: (await svc.getSettings()).demoMode } });
 
 resolver.define('getState', wrap(async (req) => state(issueOf(req), req.context.accountId)));
 resolver.define('setup', wrap(async (req) => { await svc.setup(issueOf(req), req.context.accountId, req.payload); return state(issueOf(req), req.context.accountId); }));
@@ -24,12 +24,21 @@ resolver.define('requestPayment', wrap(async (req) => { const d = await svc.requ
 
 export const handler = resolver.getDefinitions();
 
+// ---------- admin page (Jira admins only) ----------
+const admin = new Resolver();
+admin.define('getSettings', wrap(async () => ({ settings: await svc.getSettings(), isAdmin: await svc.isJiraAdmin() })));
+admin.define('setDemoMode', wrap(async (req) => ({ settings: await svc.setDemoMode(req.context.accountId, req.payload?.on), isAdmin: true })));
+export const adminHandler = admin.getDefinitions();
+
 // ---------- Rovo actions / MCP tools ----------
 // Each answers in plain text. They run with the asking user's view of Jira.
-const accountOf = (payload) => payload?.context?.accountId;
-const text = (fn) => async (payload) => {
-  try { return await fn(payload); } catch (e) { return e instanceof svc.UserError ? `Could not do that: ${e.message}` : 'Something went wrong. Try again.'; }
+// The caller comes from the function's context argument (where Forge documents it), falling back to the payload.
+const accountOf = (payload, ctx) => ctx?.principal?.accountId ?? ctx?.accountId ?? payload?.context?.accountId ?? null;
+const text = (fn) => async (payload, ctx) => {
+  try { return await fn(payload, ctx); } catch (e) { return e instanceof svc.UserError ? `VERDICT: NOT DONE\nCould not do that: ${e.message}` : 'VERDICT: NOT DONE\nSomething went wrong. Try again.'; }
 };
+/** Actions that change an order must know who is asking, so the audit trail and role checks are real. */
+const callerOf = (payload, ctx) => accountOf(payload, ctx) ?? (() => { throw new svc.UserError('I could not tell who is asking, so I will not change this order. Use the Clear to Pay panel on the issue.'); })();
 
 export const getOrder = text(async (payload) => {
   const key = svc.checkIssueKey(payload.issueKey);
@@ -48,24 +57,24 @@ export const checkInvoice = text(async (payload) => {
     : exp === null ? `Invoice asks for ${fromMinor(po.invoice.amountMinor)} ${po.currency}; the counted value is not known until both gate counts are in and agree.`
       : po.invoice.amountMinor === exp ? `Three-way match: order, counted delivery and invoice agree at ${fromMinor(exp)} ${po.currency}.`
         : `Three-way match FAILS: the invoice asks for ${fromMinor(po.invoice.amountMinor)} ${po.currency}, but what was counted is worth ${fromMinor(exp)} ${po.currency}.`;
-  return `${match}\nIf payment were requested now: ${d.verdict}${d.reasons.length ? ` — ${explain(d.reasons).join(' ')}` : '.'}\nI can record and check invoices, but I cannot approve or release a payment: only the rules can.`;
+  return `VERDICT IF PAYMENT WERE ASKED NOW: ${d.verdict}\n${match}\nIf payment were requested now: ${d.verdict}${d.reasons.length ? ` — ${explain(d.reasons).join(' ')}` : '.'}\nI can record and check invoices, but I cannot approve or release a payment: only the rules can.`;
 });
 
-export const recordInvoice = text(async (payload) => {
+export const recordInvoice = text(async (payload, ctx) => {
   const key = svc.checkIssueKey(payload.issueKey);
   await svc.assertCanSee(key);
-  const po = await svc.recordInvoice(key, accountOf(payload), { filename: payload.filename, amount: payload.amount });
-  return `Recorded ${po.invoice.file} for ${fromMinor(po.invoice.amountMinor)} ${po.currency} on ${key} (fingerprint ${po.invoice.sha256.slice(0, 12)}…). Next, the supplier approves this exact invoice from the Clear to Pay panel.`;
+  const po = await svc.recordInvoice(key, callerOf(payload, ctx), { filename: payload.filename, amount: payload.amount });
+  return `VERDICT: RECORDED\nRecorded ${quoteData(po.invoice.file)} for ${fromMinor(po.invoice.amountMinor)} ${po.currency} on ${key} (fingerprint ${po.invoice.sha256.slice(0, 12)}…). Next, the supplier approves this exact invoice from the Clear to Pay panel.`;
 });
 
-export const requestPayment = text(async (payload) => {
+export const requestPayment = text(async (payload, ctx) => {
   const key = svc.checkIssueKey(payload.issueKey);
   await svc.assertCanSee(key);
-  const d = await svc.requestPayment(key, accountOf(payload), payload.note);
+  const d = await svc.requestPayment(key, callerOf(payload, ctx), payload.note);
   return d.verdict === 'CLEARED'
     ? await (async () => {
       const po = await svc.load(key);
-      return `CLEARED: ${key} is cleared to pay ${fromMinor(po.invoice.amountMinor)} ${po.currency} to the supplier’s payout account ${po.payout.account}. All four checks passed: the receiver and the supplier’s rep both counted ${po.counts.receiver.qty}, the invoice ${po.invoice.file} matches what was counted, the supplier approved that exact invoice (fingerprint ${po.invoice.sha256.slice(0, 12)}…), and the payout account waited out its safety hold. A comment and the cleared-to-pay label were added to the issue.`;
+      return `VERDICT: CLEARED\n${key} is cleared to pay ${fromMinor(po.invoice.amountMinor)} ${po.currency} to the supplier’s payout account ${po.payout.account}. All four checks passed: the receiver and the supplier’s rep both counted ${po.counts.receiver.qty}, the invoice ${quoteData(po.invoice.file)} matches what was counted, the supplier approved that exact invoice (fingerprint ${po.invoice.sha256.slice(0, 12)}…), and the payout account waited out its safety hold. ${d.note ?? 'A comment and the cleared-to-pay label were added to the issue.'}`;
     })()
-    : `HELD: ${key} cannot be paid yet. ${explain(d.reasons).join(' ')} The decision and your note are recorded on the issue. A note or someone’s say-so is not an approval: only the checks above can clear it.`;
+    : `VERDICT: HELD\n${key} cannot be paid yet. ${explain(d.reasons).join(' ')} The decision and your note are recorded on the issue. A note or someone’s say-so is not an approval: only the checks above can clear it.`;
 });
