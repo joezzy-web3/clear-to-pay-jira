@@ -154,7 +154,7 @@ function App() {
   const [done, setDone] = useState(null);
   const run = async (name, payload) => {
     setBusy(true); setErr(null); setDone(null);
-    const r = await invoke(name, payload);
+    let r; try { r = await invoke(name, payload); } catch (e) { r = { ok: false, error: `The app could not be reached: ${e?.message ?? e}` }; }
     if (r.ok) { setSt(r); setDone(DONE[name]?.(r.state) ?? null); } else setErr(r.error);
     setBusy(false);
   };

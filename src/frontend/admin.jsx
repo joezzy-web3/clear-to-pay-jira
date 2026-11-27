@@ -7,7 +7,7 @@ function Admin() {
   const [err, setErr] = useState(null);
   const load = async (name, payload) => {
     setErr(null);
-    const r = await invoke(name, payload);
+    let r; try { r = await invoke(name, payload); } catch (e) { r = { ok: false, error: `The app could not be reached: ${e?.message ?? e}` }; }
     if (r.ok) setSt(r); else setErr(r.error);
   };
   useEffect(() => { load('getSettings'); }, []);
