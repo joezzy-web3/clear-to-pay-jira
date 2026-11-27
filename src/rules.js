@@ -94,6 +94,12 @@ export function checkSetup(p) {
   return { supplier: p.supplier, receiver: p.receiver, rep: p.rep, item: String(p.item).slice(0, 200), qty, unitPriceMinor, currency: String(p.currency || 'USD').slice(0, 3).toUpperCase(), holdHours };
 }
 
+/** The buyer sets the order up, so it may not be on the supplier's side of it. */
+export function checkBuyer(clean, buyer) {
+  if (buyer === clean.supplier) throw new Error('The supplier cannot set up its own purchase order. Sign in as the buyer.');
+  if (buyer === clean.rep) throw new Error('The supplier’s rep cannot set up the order. Sign in as the buyer.');
+}
+
 /** What a person may see of the counts: the other side's count stays sealed until both are in. */
 export function visibleCounts(po, accountId) {
   const r = po.counts?.receiver, s = po.counts?.rep;

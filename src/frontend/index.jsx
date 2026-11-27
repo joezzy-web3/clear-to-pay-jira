@@ -124,7 +124,9 @@ function App() {
             <Lozenge appearance={s.paid ? 'success' : s.decision.verdict === 'CLEARED' ? 'success' : 'moved'} isBold>{s.paid ? 'Cleared to pay' : s.decision.verdict === 'CLEARED' ? 'Ready: would clear' : 'Held until the checks pass'}</Lozenge>
             <Text>{String(s.qty)} × {s.item} at {s.unitPrice} {s.currency} · total {s.orderTotal} {s.currency}</Text>
           </Inline>
+          <Text>You are: <Strong>{s.roles.length ? s.roles.map((r) => ({ buyer: 'the buyer', receiver: 'the receiver', rep: 'the supplier’s rep', supplier: 'the supplier' })[r]).join(' and ') : 'viewing only'}</Strong></Text>
           <Inline space="space.200"><Text>Supplier</Text><User accountId={s.people.supplier} /><Text>Receiver</Text><User accountId={s.people.receiver} /><Text>Rep</Text><User accountId={s.people.rep} /></Inline>
+          {s.roles.includes('buyer') && !s.counts.receiver && !s.counts.rep && !s.invoice ? <Button appearance="subtle" onClick={() => run('cancel')}>Cancel this order</Button> : null}
           <Counts s={s} run={run} />
           <Invoice s={s} attachments={st.attachments} run={run} />
           <Payout s={s} run={run} />

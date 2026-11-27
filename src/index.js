@@ -13,6 +13,7 @@ const state = async (key, accountId) => ({ state: svc.view(await svc.load(key), 
 
 resolver.define('getState', wrap(async (req) => state(issueOf(req), req.context.accountId)));
 resolver.define('setup', wrap(async (req) => { await svc.setup(issueOf(req), req.context.accountId, req.payload); return state(issueOf(req), req.context.accountId); }));
+resolver.define('cancel', wrap(async (req) => { await svc.cancelOrder(issueOf(req), req.context.accountId); return state(issueOf(req), req.context.accountId); }));
 resolver.define('count', wrap(async (req) => { await svc.submitCount(issueOf(req), req.context.accountId, req.payload.qty); return state(issueOf(req), req.context.accountId); }));
 resolver.define('resetCounts', wrap(async (req) => { await svc.resetCounts(issueOf(req), req.context.accountId); return state(issueOf(req), req.context.accountId); }));
 resolver.define('recordInvoice', wrap(async (req) => { await svc.recordInvoice(issueOf(req), req.context.accountId, req.payload); return state(issueOf(req), req.context.accountId); }));

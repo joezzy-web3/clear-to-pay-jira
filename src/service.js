@@ -4,7 +4,7 @@
 import api, { route } from '@forge/api';
 import { kvs } from '@forge/kvs';
 import { createHash } from 'node:crypto';
-import { decide, checkSetup, visibleCounts, roleOf, explain, toMinor, fromMinor, expectedAmount, holdEndsAt, countedQty } from './rules.js';
+import { decide, checkSetup, checkBuyer, visibleCounts, roleOf, explain, toMinor, fromMinor, expectedAmount, holdEndsAt, countedQty } from './rules.js';
 
 const KEY = (issueKey) => `po:${issueKey}`;
 const MAX_LOG = 50;
@@ -99,12 +99,20 @@ export function summary(issueKey, po, now = Date.now()) {
 export async function setup(issueKey, accountId, p) {
   if (await load(issueKey)) fail('This issue already has a Clear to Pay order.');
   const clean = checkSetup(p);
-  if (clean.receiver === accountId && clean.rep === accountId) fail('You cannot count for both sides.');
+  checkBuyer(clean, accountId);
   const po = { ...clean, buyer: accountId, counts: {}, createdAt: Date.now() };
   log(po, { by: accountId, what: `Order set up: ${po.qty} × ${po.item} at ${fromMinor(po.unitPriceMinor)} ${po.currency}. Payout hold ${po.holdHours} h.` });
   await save(issueKey, po);
   await comment(issueKey, ['Clear to Pay: order set up', `${po.qty} × ${po.item} at ${fromMinor(po.unitPriceMinor)} ${po.currency}. Payment clears only when both gate counts agree, the invoice matches what was counted, the supplier approves that exact invoice, and its payout account has waited out its hold.`]);
   return po;
+}
+
+export async function cancelOrder(issueKey, accountId) {
+  const po = await load(issueKey) ?? fail('No order on this issue.');
+  if (accountId !== po.buyer) fail('Only the buyer who set up the order can cancel it.');
+  if (po.counts?.receiver || po.counts?.rep || po.invoice) fail('Counting or invoicing has started, so the order can no longer be cancelled.');
+  await kvs.delete(KEY(issueKey));
+  await comment(issueKey, ['Clear to Pay: order cancelled', 'The buyer cancelled this order before any count or invoice. A new one can be set up.']);
 }
 
 export async function submitCount(issueKey, accountId, qty) {

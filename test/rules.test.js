@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decide, checkSetup, visibleCounts, toMinor, fromMinor, HOUR } from '../src/rules.js';
+import { decide, checkSetup, checkBuyer, visibleCounts, toMinor, fromMinor, HOUR } from '../src/rules.js';
 
 const now = 1_000 * HOUR;
 const base = () => ({
@@ -67,4 +67,12 @@ test('counts stay sealed from the other side until both are in', () => {
 test('money stays exact', () => {
   assert.equal(toMinor('1,250.5'), 125050);
   assert.equal(fromMinor(125050), '1,250.50');
+});
+
+test('the buyer cannot be on the supplier side of its own order', () => {
+  const c = { supplier: 'S', receiver: 'R', rep: 'P' };
+  assert.throws(() => checkBuyer(c, 'S'), /supplier cannot set up/);
+  assert.throws(() => checkBuyer(c, 'P'), /rep cannot set up/);
+  assert.doesNotThrow(() => checkBuyer(c, 'B'));
+  assert.doesNotThrow(() => checkBuyer(c, 'R'), 'a small buyer may count its own deliveries');
 });
