@@ -47,6 +47,8 @@ export function countedQty(po) {
   return r.qty === s.qty ? r.qty : null;
 }
 
+export const holdText = (h) => (h < 1 ? `${Math.round(h * 60)} minutes` : `${h} hours`);
+
 export const holdEndsAt = (po) => (po.payout ? po.payout.setAt + (po.holdHours ?? DEFAULT_HOLD_HOURS) * HOUR : null);
 
 /** The decision. Returns { verdict: 'CLEARED' | 'HELD', reasons: [code], expectedMinor }. */

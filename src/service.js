@@ -4,7 +4,7 @@
 import api, { route } from '@forge/api';
 import { kvs } from '@forge/kvs';
 import { createHash } from 'node:crypto';
-import { decide, checkSetup, checkBuyer, visibleCounts, roleOf, explain, toMinor, fromMinor, expectedAmount, holdEndsAt, countedQty } from './rules.js';
+import { decide, checkSetup, checkBuyer, visibleCounts, roleOf, explain, toMinor, fromMinor, expectedAmount, holdEndsAt, countedQty, holdText } from './rules.js';
 
 const KEY = (issueKey) => `po:${issueKey}`;
 const MAX_LOG = 50;
@@ -101,7 +101,7 @@ export async function setup(issueKey, accountId, p) {
   const clean = checkSetup(p);
   checkBuyer(clean, accountId);
   const po = { ...clean, buyer: accountId, counts: {}, createdAt: Date.now() };
-  log(po, { by: accountId, what: `Order set up: ${po.qty} × ${po.item} at ${fromMinor(po.unitPriceMinor)} ${po.currency}. Payout hold ${po.holdHours} h.` });
+  log(po, { by: accountId, what: `Order set up: ${po.qty} × ${po.item} at ${fromMinor(po.unitPriceMinor)} ${po.currency}. Payout hold ${holdText(po.holdHours)}.` });
   await save(issueKey, po);
   await comment(issueKey, ['Clear to Pay: order set up', `${po.qty} × ${po.item} at ${fromMinor(po.unitPriceMinor)} ${po.currency}. Payment clears only when both gate counts agree, the invoice matches what was counted, the supplier approves that exact invoice, and its payout account has waited out its hold.`]);
   return po;
@@ -176,9 +176,9 @@ export async function setPayout(issueKey, accountId, account) {
   const masked = `…${raw.slice(-4)}`;
   const changed = Boolean(po.payout);
   po.payout = { account: masked, setAt: Date.now() };
-  log(po, { by: accountId, what: changed ? `Payout account CHANGED to ${masked}. Safety hold of ${po.holdHours} h restarts.` : `Payout account set to ${masked}. Safety hold of ${po.holdHours} h starts.` });
+  log(po, { by: accountId, what: changed ? `Payout account CHANGED to ${masked}. Safety hold of ${holdText(po.holdHours)} restarts.` : `Payout account set to ${masked}. Safety hold of ${holdText(po.holdHours)} starts.` });
   await save(issueKey, po);
-  if (changed) await comment(issueKey, ['Clear to Pay: payout account changed', `The supplier’s payout account changed to ${masked}. No payment can clear for ${po.holdHours} hours. If you did not expect this, call the supplier on a number you already know.`]);
+  if (changed) await comment(issueKey, ['Clear to Pay: payout account changed', `The supplier’s payout account changed to ${masked}. No payment can clear for ${holdText(po.holdHours)}. If you did not expect this, call the supplier on a number you already know.`]);
   return po;
 }
 
