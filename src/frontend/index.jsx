@@ -69,9 +69,10 @@ function Invoice({ s, attachments, run }) {
         {s.expected ? <Text>The counted delivery is worth <Strong>{s.expected} {s.currency}</Strong>. The invoice must ask for exactly that.</Text> : null}
         {!s.approval && !s.paid ? (
           <Inline space="space.100" alignBlock="end">
-            <Box><Label labelFor="att">Attachment</Label><Select id="att" options={attachments.map((a) => ({ label: a.filename, value: a.id }))} onChange={(o) => setPick(o.value)} /></Box>
+            <Box xcss={{ minWidth: '240px' }}><Label labelFor="att">Attachment</Label><Select id="att" placeholder={attachments.length ? 'Pick the invoice file' : 'No files yet'} options={attachments.map((a) => ({ label: a.filename, value: a.id }))} onChange={(o) => setPick(o.value)} /></Box>
             <Box><Label labelFor="amt">Invoice amount</Label><Textfield id="amt" placeholder={s.expected ?? s.orderTotal} onChange={(e) => setAmount(e.target.value)} /></Box>
             <Button onClick={() => run('recordInvoice', { attachmentId: pick, amount })}>Record invoice</Button>
+            <Button appearance="subtle" onClick={() => run('getState')}>Refresh files</Button>
           </Inline>
         ) : null}
         {s.approval ? <Lozenge appearance="success">Approved by the supplier for {s.approval.amount} {s.currency}</Lozenge>
