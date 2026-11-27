@@ -59,6 +59,8 @@ function Counts({ s, run }) {
 function Invoice({ s, attachments, run }) {
   const [pick, setPick] = useState(null);
   const [amount, setAmount] = useState('');
+  const [replacing, setReplacing] = useState(false);
+  const canEdit = !s.approval && !s.paid && (!s.invoice || replacing);
   return (
     <Box xcss={card}>
       <Stack space="space.100">
@@ -67,17 +69,18 @@ function Invoice({ s, attachments, run }) {
           <Text><Strong>{s.invoice.file}</Strong> for {s.invoice.amount} {s.currency} · fingerprint {s.invoice.sha256.slice(0, 12)}…</Text>
         ) : <Text>No invoice recorded. Attach the supplier’s invoice to this issue, then record it here, or ask the Clear to Pay agent in Rovo.</Text>}
         {s.expected ? <Text>The counted delivery is worth <Strong>{s.expected} {s.currency}</Strong>. The invoice must ask for exactly that.</Text> : null}
-        {!s.approval && !s.paid ? (
+        {canEdit ? (
           <Inline space="space.100" alignBlock="end">
             <Box xcss={{ minWidth: '240px' }}><Label labelFor="att">Attachment</Label><Select id="att" placeholder={attachments.length ? 'Pick the invoice file' : 'No files yet'} options={attachments.map((a) => ({ label: a.filename, value: a.id }))} onChange={(o) => setPick(o.value)} /></Box>
             <Box><Label labelFor="amt">Invoice amount</Label><Textfield id="amt" placeholder={s.expected ?? s.orderTotal} onChange={(e) => setAmount(e.target.value)} /></Box>
-            <Button onClick={() => run('recordInvoice', { attachmentId: pick, amount })}>Record invoice</Button>
+            <Button appearance="primary" isDisabled={!pick || !amount} onClick={async () => { await run('recordInvoice', { attachmentId: pick, amount }); setReplacing(false); }}>Record invoice</Button>
             <Button appearance="subtle" onClick={() => run('getState')}>Refresh files</Button>
           </Inline>
         ) : null}
         {s.approval ? <Lozenge appearance="success">Approved by the supplier for {s.approval.amount} {s.currency}</Lozenge>
           : s.invoice && s.roles.includes('supplier') ? <Button appearance="primary" onClick={() => run('approve')}>Approve this invoice and amount</Button>
-            : s.invoice ? <Lozenge appearance="moved">Waiting for the supplier’s approval</Lozenge> : null}
+            : s.invoice ? <Text>Waiting for the supplier to approve this invoice and amount.</Text> : null}
+        {s.invoice && !s.approval && !s.paid && !replacing ? <Button appearance="subtle" onClick={() => setReplacing(true)}>Replace the invoice</Button> : null}
       </Stack>
     </Box>
   );
@@ -94,7 +97,7 @@ function Payout({ s, run }) {
         {s.roles.includes('supplier') && !s.paid ? (
           <Inline space="space.100" alignBlock="end">
             <Box><Label labelFor="acct">{s.payout ? 'Change account (restarts the hold)' : 'Account number or IBAN'}</Label><Textfield id="acct" onChange={(e) => setAcct(e.target.value)} /></Box>
-            <Button onClick={() => run('setPayout', { account: acct })}>{s.payout ? 'Change' : 'Save'}</Button>
+            <Button appearance="primary" isDisabled={!acct} onClick={() => run('setPayout', { account: acct })}>{s.payout ? 'Change' : 'Save'}</Button>
           </Inline>
         ) : null}
       </Stack>
@@ -102,15 +105,27 @@ function Payout({ s, run }) {
   );
 }
 
+const DONE = {
+  setup: () => 'Order set up. Next: the receiver and the supplier’s rep each count the delivery at the gate.',
+  count: () => 'Your count is sealed. The other count stays hidden until both are in.',
+  resetCounts: () => 'Counts cleared. Both sides count again.',
+  recordInvoice: (s) => `Invoice recorded and fingerprinted (${s.invoice?.sha256?.slice(0, 12)}…). Next: the supplier approves the invoice and amount.`,
+  approve: (s) => (s.payout ? 'Invoice approved. Anyone can now ask for payment.' : 'Invoice approved. Next: set the payout account below.'),
+  setPayout: (s) => `Payout account saved. Payment can clear after the safety hold ends (${when(s.payout?.holdEndsAt)}).`,
+  cancel: () => 'Order cancelled. You can set up a new one.',
+  requestPayment: (s) => (s.paid ? 'Cleared to pay. A comment and the cleared-to-pay label were added to this issue.' : 'Held. The checks still failing are listed under step 4.'),
+};
+
 function App() {
   const [st, setSt] = useState(null);
   const [err, setErr] = useState(null);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState('');
+  const [done, setDone] = useState(null);
   const run = async (name, payload) => {
-    setBusy(true); setErr(null);
+    setBusy(true); setErr(null); setDone(null);
     const r = await invoke(name, payload);
-    if (r.ok) setSt(r); else setErr(r.error);
+    if (r.ok) { setSt(r); setDone(DONE[name]?.(r.state) ?? null); } else setErr(r.error);
     setBusy(false);
   };
   useEffect(() => { run('getState'); }, []);
@@ -119,6 +134,7 @@ function App() {
   return (
     <Stack space="space.200">
       {err ? <SectionMessage appearance="error"><Text>{err}</Text></SectionMessage> : null}
+      {done ? <SectionMessage appearance={done.startsWith('Held') ? 'warning' : 'success'}><Text>{done}</Text></SectionMessage> : null}
       {!s.exists ? <Setup run={run} /> : (
         <Stack space="space.150">
           <Inline space="space.100" alignBlock="center">
