@@ -1,7 +1,9 @@
 // Everything that reads or changes a purchase order goes through here: the issue panel
 // (resolver) and the Rovo agent / MCP actions share it, so they follow exactly the same rules.
 // Orders live in Forge storage under the issue key; every decision is also written to the issue.
-import api, { route } from '@forge/api';
+import * as forgeApi from '@forge/api';
+const { route } = forgeApi;
+const api = forgeApi.default?.asUser ? forgeApi.default : forgeApi.default?.default ?? forgeApi;
 import { kvs } from '@forge/kvs';
 import { createHash } from 'node:crypto';
 import { decide, checkSetup, checkBuyer, visibleCounts, roleOf, explain, toMinor, fromMinor, expectedAmount, holdEndsAt, countedQty, holdText, overDelivered, quoteData } from './rules.js';

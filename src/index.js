@@ -1,6 +1,8 @@
 // Entry points. `handler` serves the issue panel; the other exports are Rovo actions,
 // also exposed as MCP tools. They all go through service.js and the rules in rules.js.
-import Resolver from '@forge/resolver';
+import * as ResolverPkg from '@forge/resolver';
+// Works whichever way the bundler wraps this CommonJS package.
+const Resolver = typeof ResolverPkg.default === 'function' ? ResolverPkg.default : ResolverPkg.default?.default ?? ResolverPkg;
 import * as svc from './service.js';
 import { decide, explain, fromMinor, expectedAmount, quoteData } from './rules.js';
 
