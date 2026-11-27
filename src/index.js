@@ -18,6 +18,7 @@ resolver.define('count', wrap(async (req) => { await svc.submitCount(issueOf(req
 resolver.define('resetCounts', wrap(async (req) => { await svc.resetCounts(issueOf(req), req.context.accountId); return state(issueOf(req), req.context.accountId); }));
 resolver.define('recordInvoice', wrap(async (req) => { await svc.recordInvoice(issueOf(req), req.context.accountId, req.payload); return state(issueOf(req), req.context.accountId); }));
 resolver.define('approve', wrap(async (req) => { await svc.approveInvoice(issueOf(req), req.context.accountId); return state(issueOf(req), req.context.accountId); }));
+resolver.define('confirmSeparate', wrap(async (req) => { await svc.confirmSeparate(issueOf(req), req.context.accountId); return state(issueOf(req), req.context.accountId); }));
 resolver.define('setPayout', wrap(async (req) => { await svc.setPayout(issueOf(req), req.context.accountId, req.payload.account); return state(issueOf(req), req.context.accountId); }));
 resolver.define('requestPayment', wrap(async (req) => { const d = await svc.requestPayment(issueOf(req), req.context.accountId, req.payload?.note); return { decision: d, ...(await state(issueOf(req), req.context.accountId)) }; }));
 

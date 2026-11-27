@@ -22,6 +22,22 @@ export function checkIssueKey(k) {
 export const load = (issueKey) => kvs.get(KEY(issueKey));
 const save = (issueKey, po) => kvs.set(KEY(issueKey), po);
 
+// ---------- duplicate-invoice index (across all orders) ----------
+// inv:<sha256>               -> the issue that holds that exact invoice file
+// paid:<supplier>:<amount>   -> recent payments to that supplier for that amount
+const INV = (sha) => `inv:${sha}`;
+const PAID = (supplier, amountMinor) => `paid:${supplier}:${amountMinor}`;
+const SIMILAR_DAYS = 30;
+
+async function findDuplicates(issueKey, po, now = Date.now()) {
+  if (!po.invoice) return null;
+  const owner = await kvs.get(INV(po.invoice.sha256));
+  const sameFile = owner && owner !== issueKey ? owner : null;
+  const recent = (await kvs.get(PAID(po.supplier, po.invoice.amountMinor))) ?? [];
+  const similar = recent.filter((p) => p.key !== issueKey && now - p.at < SIMILAR_DAYS * 24 * 3_600_000);
+  return { sameFile, similar, confirmed: po.duplicate?.confirmed ?? null };
+}
+
 function log(po, entry) {
   po.log = [{ at: Date.now(), ...entry }, ...(po.log ?? [])].slice(0, MAX_LOG);
 }
@@ -71,6 +87,7 @@ export function view(po, accountId, now = Date.now()) {
     invoice: po.invoice ? { file: po.invoice.file, amount: fromMinor(po.invoice.amountMinor), sha256: po.invoice.sha256, by: po.invoice.by, at: po.invoice.at } : null,
     approval: po.supplierApproval ? { amount: fromMinor(po.supplierApproval.amountMinor), sha256: po.supplierApproval.sha256, at: po.supplierApproval.at } : null,
     payout: po.payout ? { account: po.payout.account, setAt: po.payout.setAt, holdEndsAt: holdEndsAt(po) } : null,
+    duplicate: po.duplicate ? { sameFile: po.duplicate.sameFile, similar: po.duplicate.similar.map((p) => p.key), confirmed: Boolean(po.invoice && po.duplicate.confirmed?.sha256 === po.invoice.sha256) } : null,
     paid: Boolean(po.paid),
     decision: { verdict: d.verdict, reasons: d.reasons, explained: explain(d.reasons) },
     log: po.log ?? [],
@@ -87,6 +104,7 @@ export function summary(issueKey, po, now = Date.now()) {
     `${issueKey}: ${po.qty} × ${po.item} at ${fromMinor(po.unitPriceMinor)} ${po.currency} (order total ${fromMinor(po.qty * po.unitPriceMinor)} ${po.currency}).`,
     `Gate counts: ${po.counts?.receiver && po.counts?.rep ? (q === null ? 'both in, and they DIFFER' : `both in, agreed: ${q}`) : `${[po.counts?.receiver && 'receiver', po.counts?.rep && 'supplier’s rep'].filter(Boolean).join(' and ') || 'none'} in so far (each stays sealed until both are in)`}.`,
     `Invoice: ${po.invoice ? `${po.invoice.file}, ${fromMinor(po.invoice.amountMinor)} ${po.currency}, fingerprint ${po.invoice.sha256.slice(0, 12)}…` : 'none recorded'}${exp !== null ? `; the counted delivery is worth ${fromMinor(exp)} ${po.currency}` : ''}.`,
+    ...(po.duplicate?.sameFile ? [`DUPLICATE: this exact invoice file is already on ${po.duplicate.sameFile}.`] : po.duplicate?.similar?.length ? [`Possible duplicate: this supplier was paid the same amount on ${po.duplicate.similar.map((p) => p.key).join(', ')} in the last 30 days${po.duplicate.confirmed ? '; the buyer confirmed this is a separate invoice' : '; the buyer has not confirmed it is separate'}.`] : []),
     `Supplier approval: ${po.supplierApproval ? `yes, for ${fromMinor(po.supplierApproval.amountMinor)} ${po.currency}` : 'not yet'}.`,
     `Payout account: ${po.payout ? `${po.payout.account}, ${now < holdEndsAt(po) ? `in its safety hold until ${new Date(holdEndsAt(po)).toISOString()}` : 'hold passed'}` : 'not set'}.`,
     po.paid ? 'Status: CLEARED TO PAY (already decided).' : `If payment were requested now: ${d.verdict}${d.reasons.length ? ` — ${explain(d.reasons).join(' ')}` : '.'}`,
@@ -152,9 +170,15 @@ export async function recordInvoice(issueKey, accountId, { attachmentId, filenam
     ?? fail(`No attachment ${filename ?? attachmentId} on ${issueKey}. Attach the invoice to the issue first.`);
   const amountMinor = toMinor(amount);
   const sha256 = await fingerprint(a.id);
+  if (po.invoice && po.invoice.sha256 !== sha256 && (await kvs.get(INV(po.invoice.sha256))) === issueKey) await kvs.delete(INV(po.invoice.sha256));
+  if (!(await kvs.get(INV(sha256)))) await kvs.set(INV(sha256), issueKey);
   po.invoice = { file: a.filename, attachmentId: a.id, sha256, amountMinor, by: accountId ?? 'agent', at: Date.now() };
   log(po, { by: accountId ?? 'agent', what: `Invoice recorded: ${a.filename}, ${fromMinor(amountMinor)} ${po.currency}, fingerprint ${sha256.slice(0, 12)}….` });
+  po.duplicate = await findDuplicates(issueKey, po);
+  if (po.duplicate.sameFile) log(po, { by: 'clear-to-pay', what: `DUPLICATE: this exact invoice file is already on ${po.duplicate.sameFile}. Payment is held.` });
+  else if (po.duplicate.similar.length) log(po, { by: 'clear-to-pay', what: `Possible duplicate: this supplier was paid ${fromMinor(amountMinor)} ${po.currency} on ${po.duplicate.similar.map((p) => p.key).join(', ')} in the last 30 days.` });
   await save(issueKey, po);
+  if (po.duplicate.sameFile) await comment(issueKey, ['Clear to Pay: duplicate invoice', `This exact invoice file is already recorded on ${po.duplicate.sameFile}. One invoice can only be paid once, so this order is held.`]);
   return po;
 }
 
@@ -184,9 +208,24 @@ export async function setPayout(issueKey, accountId, account) {
   return po;
 }
 
+/** The buyer confirms a same-supplier, same-amount payment elsewhere is a different invoice. Never clears an exact duplicate. */
+export async function confirmSeparate(issueKey, accountId) {
+  const po = await load(issueKey) ?? fail('No order on this issue.');
+  if (accountId !== po.buyer) fail('Only the buyer can confirm this is a separate invoice.');
+  if (!po.invoice) fail('There is no invoice yet.');
+  po.duplicate = await findDuplicates(issueKey, po);
+  if (po.duplicate.sameFile) fail(`This exact invoice file is on ${po.duplicate.sameFile}. That cannot be confirmed away.`);
+  if (!po.duplicate.similar.length) fail('There is no similar payment to confirm against.');
+  po.duplicate.confirmed = { by: accountId, at: Date.now(), sha256: po.invoice.sha256 };
+  log(po, { by: accountId, what: `Buyer confirmed ${po.invoice.file} is a separate invoice from ${po.duplicate.similar.map((p) => p.key).join(', ')}.` });
+  await save(issueKey, po);
+  return po;
+}
+
 /** Anyone may ask; only the rules decide. The request and its note are recorded either way. */
 export async function requestPayment(issueKey, accountId, note = '') {
   const po = await load(issueKey) ?? fail('No order on this issue.');
+  if (po.invoice && !po.paid) po.duplicate = await findDuplicates(issueKey, po);
   const d = decide(po);
   const who = accountId ?? 'agent';
   const said = String(note ?? '').trim().slice(0, 300);
@@ -194,6 +233,8 @@ export async function requestPayment(issueKey, accountId, note = '') {
     po.paid = { at: Date.now(), by: who, amountMinor: po.invoice.amountMinor };
     log(po, { by: who, what: `Payment requested${said ? ` (“${said}”)` : ''}: CLEARED. ${fromMinor(po.invoice.amountMinor)} ${po.currency} to ${po.payout.account}.` });
     await save(issueKey, po);
+    const pk = PAID(po.supplier, po.invoice.amountMinor);
+    await kvs.set(pk, [{ key: issueKey, at: Date.now() }, ...((await kvs.get(pk)) ?? [])].slice(0, 20));
     await addLabel(issueKey, 'cleared-to-pay');
     await comment(issueKey, ['Clear to Pay: CLEARED TO PAY', `${fromMinor(po.invoice.amountMinor)} ${po.currency} to the supplier’s payout account ${po.payout.account}. Counts agreed, the invoice matches what was counted, the supplier approved this exact invoice (fingerprint ${po.invoice.sha256.slice(0, 12)}…), and the payout account has waited out its hold.`]);
   } else {

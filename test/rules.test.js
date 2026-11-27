@@ -76,3 +76,15 @@ test('the buyer cannot be on the supplier side of its own order', () => {
   assert.doesNotThrow(() => checkBuyer(c, 'B'));
   assert.doesNotThrow(() => checkBuyer(c, 'R'), 'a small buyer may count its own deliveries');
 });
+
+test('the same invoice file on another order is held, and the buyer cannot confirm it away', () => {
+  const po = { ...base(), duplicate: { sameFile: 'PO-7', similar: [], confirmed: { sha256: 'aa' } } };
+  assert.deepEqual(decide(po, now).reasons, ['DUPLICATE_INVOICE']);
+});
+
+test('same supplier, same amount paid recently: held until the buyer confirms this exact invoice', () => {
+  const po = { ...base(), duplicate: { sameFile: null, similar: [{ key: 'PO-3', at: now }] } };
+  assert.deepEqual(decide(po, now).reasons, ['SIMILAR_PAID']);
+  assert.equal(decide({ ...po, duplicate: { ...po.duplicate, confirmed: { sha256: 'aa' } } }, now).verdict, 'CLEARED');
+  assert.deepEqual(decide({ ...po, duplicate: { ...po.duplicate, confirmed: { sha256: 'old' } } }, now).reasons, ['SIMILAR_PAID']);
+});

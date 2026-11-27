@@ -6,7 +6,9 @@
 //   2. an invoice is recorded, and its amount equals unit price x counted quantity,
 //   3. the supplier approved that exact invoice (same fingerprint, same amount),
 //   4. the supplier has a payout account on file, and it has waited out its hold,
-//   5. the order is not already paid.
+//   5. the order is not already paid,
+//   6. the same invoice file is not on another order, and if this supplier was paid this
+//      same amount on another order in the last 30 days, the buyer confirmed it is a separate invoice.
 // Anything else is HELD, with every reason listed. Nobody's say-so changes this, including the AI's.
 
 export const DEFAULT_HOLD_HOURS = 72;
@@ -23,6 +25,8 @@ export const REASONS = {
   APPROVAL_FOR_OTHER_INVOICE: 'The supplier approved a different invoice or amount than the one recorded.',
   NO_PAYOUT: 'The supplier has not set a payout account.',
   PAYOUT_IN_HOLD: 'The supplier’s payout account changed recently and is still in its safety hold.',
+  DUPLICATE_INVOICE: 'This exact invoice file is already on another order. One invoice can only be paid once.',
+  SIMILAR_PAID: 'This supplier was paid the same amount on another order in the last 30 days. The buyer must confirm this is a separate invoice.',
 };
 
 /** Money is kept in minor units (cents) as integers, so there is no rounding. */
@@ -65,6 +69,9 @@ export function decide(po, now = Date.now()) {
   const a = po.supplierApproval;
   if (!a) reasons.push('NO_SUPPLIER_APPROVAL');
   else if (!po.invoice || a.sha256 !== po.invoice.sha256 || a.amountMinor !== po.invoice.amountMinor) reasons.push('APPROVAL_FOR_OTHER_INVOICE');
+  const dup = po.duplicate;
+  if (dup?.sameFile) reasons.push('DUPLICATE_INVOICE');
+  if (dup?.similar?.length && !(po.invoice && dup.confirmed?.sha256 === po.invoice.sha256)) reasons.push('SIMILAR_PAID');
   if (!po.payout) reasons.push('NO_PAYOUT');
   else if (now < holdEndsAt(po)) reasons.push('PAYOUT_IN_HOLD');
   return { verdict: reasons.length ? 'HELD' : 'CLEARED', reasons, expectedMinor };

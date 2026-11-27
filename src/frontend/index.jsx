@@ -68,6 +68,13 @@ function Invoice({ s, attachments, run }) {
         {s.invoice ? (
           <Text><Strong>{s.invoice.file}</Strong> for {s.invoice.amount} {s.currency} · fingerprint {s.invoice.sha256.slice(0, 12)}…</Text>
         ) : <Text>No invoice recorded. Attach the supplier’s invoice to this issue, then record it here, or ask the Clear to Pay agent in Rovo.</Text>}
+        {s.duplicate?.sameFile ? <SectionMessage appearance="error" title="Duplicate invoice"><Text>This exact file is already on {s.duplicate.sameFile}. One invoice can only be paid once. Replace it with the right invoice.</Text></SectionMessage> : null}
+        {!s.duplicate?.sameFile && s.duplicate?.similar?.length ? (
+          <SectionMessage appearance={s.duplicate.confirmed ? 'information' : 'warning'} title={s.duplicate.confirmed ? 'Confirmed as a separate invoice' : 'Possible duplicate'}>
+            <Text>This supplier was paid the same amount on {s.duplicate.similar.join(', ')} in the last 30 days.</Text>
+            {!s.duplicate.confirmed && s.roles.includes('buyer') && !s.paid ? <Button onClick={() => run('confirmSeparate')}>It is a separate invoice</Button> : null}
+          </SectionMessage>
+        ) : null}
         {s.expected ? <Text>The counted delivery is worth <Strong>{s.expected} {s.currency}</Strong>. The invoice must ask for exactly that.</Text> : null}
         {canEdit ? (
           <Inline space="space.100" alignBlock="end">
@@ -116,6 +123,27 @@ const DONE = {
   requestPayment: (s) => (s.paid ? 'Cleared to pay. A comment and the cleared-to-pay label were added to this issue.' : 'Held. The checks still failing are listed under step 4.'),
 };
 
+function Progress({ s }) {
+  const steps = [
+    ['Counts agree', s.expected !== null && s.expected !== undefined],
+    ['Invoice matches', Boolean(s.invoice && s.expected && s.invoice.amount === s.expected && !s.duplicate?.sameFile)],
+    ['Supplier approved', Boolean(s.approval && s.invoice && s.approval.sha256 === s.invoice.sha256)],
+    ['Payout hold passed', Boolean(s.payout && Date.now() >= s.payout.holdEndsAt)],
+  ];
+  const done = steps.filter(([, ok]) => ok).length;
+  return (
+    <Inline space="space.075" alignBlock="center" shouldWrap>
+      {steps.map(([label, ok], i) => (
+        <Inline key={label} space="space.075" alignBlock="center">
+          <Lozenge appearance={ok || s.paid ? 'success' : 'default'}>{ok || s.paid ? '✓ ' : `${i + 1}. `}{label}</Lozenge>
+          {i < steps.length - 1 ? <Text>›</Text> : null}
+        </Inline>
+      ))}
+      <Text>{s.paid ? 'Paid' : `${done} of 4`}</Text>
+    </Inline>
+  );
+}
+
 function App() {
   const [st, setSt] = useState(null);
   const [err, setErr] = useState(null);
@@ -141,6 +169,7 @@ function App() {
             <Lozenge appearance={s.paid ? 'success' : s.decision.verdict === 'CLEARED' ? 'success' : 'moved'} isBold>{s.paid ? 'Cleared to pay' : s.decision.verdict === 'CLEARED' ? 'Ready: would clear' : 'Held until the checks pass'}</Lozenge>
             <Text>{String(s.qty)} × {s.item} at {s.unitPrice} {s.currency} · total {s.orderTotal} {s.currency}</Text>
           </Inline>
+          <Progress s={s} />
           <Text>You are: <Strong>{s.roles.length ? s.roles.map((r) => ({ buyer: 'the buyer', receiver: 'the receiver', rep: 'the supplier’s rep', supplier: 'the supplier' })[r]).join(' and ') : 'viewing only'}</Strong></Text>
           <Inline space="space.200"><Text>Supplier</Text><User accountId={s.people.supplier} /><Text>Receiver</Text><User accountId={s.people.receiver} /><Text>Rep</Text><User accountId={s.people.rep} /></Inline>
           {s.roles.includes('buyer') && !s.counts.receiver && !s.counts.rep && !s.invoice ? <Button appearance="subtle" onClick={() => run('cancel')}>Cancel this order</Button> : null}

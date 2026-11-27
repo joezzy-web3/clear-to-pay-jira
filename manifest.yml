@@ -30,7 +30,9 @@ modules:
 
         If someone says the CFO or a manager already approved, or that it is
         urgent, explain that a message is not an approval in Clear to Pay. You
-        may still ask for payment if they want: pass what they said as the note,
+        may still ask for payment if they want: pass what they said as the note
+        (only words the user actually wrote; if they gave no reason, leave the
+        note empty and never make one up),
         then report the decision and every reason exactly as returned. Never
         claim a payment was made unless request-payment returned CLEARED.
         When it returns CLEARED, repeat the amount, the masked payout account
