@@ -77,7 +77,7 @@ function Invoice({ s, attachments, run }) {
             <Button appearance="subtle" onClick={() => run('getState')}>Refresh files</Button>
           </Inline>
         ) : null}
-        {s.approval ? <Lozenge appearance="success">Approved by the supplier for {s.approval.amount} {s.currency}</Lozenge>
+        {s.approval ? <Text>✅ Approved by the supplier for <Strong>{s.approval.amount} {s.currency}</Strong>.</Text>
           : s.invoice && s.roles.includes('supplier') ? <Button appearance="primary" onClick={() => run('approve')}>Approve this invoice and amount</Button>
             : s.invoice ? <Text>Waiting for the supplier to approve this invoice and amount.</Text> : null}
         {s.invoice && !s.approval && !s.paid && !replacing ? <Button appearance="subtle" onClick={() => setReplacing(true)}>Replace the invoice</Button> : null}

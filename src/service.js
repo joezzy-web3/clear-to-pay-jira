@@ -174,8 +174,10 @@ export async function setPayout(issueKey, accountId, account) {
   const raw = String(account ?? '').replace(/\s+/g, '');
   if (raw.length < 6 || raw.length > 40 || !/^[A-Za-z0-9]+$/.test(raw)) fail('Enter the account number or IBAN, letters and digits only.');
   const masked = `…${raw.slice(-4)}`;
+  const digest = createHash('sha256').update(`${issueKey}:${raw.toUpperCase()}`).digest('hex');
+  if (po.payout?.digest === digest) fail('That is already the payout account. Nothing changed, and the hold was not restarted.');
   const changed = Boolean(po.payout);
-  po.payout = { account: masked, setAt: Date.now() };
+  po.payout = { account: masked, digest, setAt: Date.now() };
   log(po, { by: accountId, what: changed ? `Payout account CHANGED to ${masked}. Safety hold of ${holdText(po.holdHours)} restarts.` : `Payout account set to ${masked}. Safety hold of ${holdText(po.holdHours)} starts.` });
   await save(issueKey, po);
   if (changed) await comment(issueKey, ['Clear to Pay: payout account changed', `The supplier’s payout account changed to ${masked}. No payment can clear for ${holdText(po.holdHours)}. If you did not expect this, call the supplier on a number you already know.`]);
