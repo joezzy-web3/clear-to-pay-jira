@@ -62,6 +62,9 @@ export const requestPayment = text(async (payload) => {
   await svc.assertCanSee(key);
   const d = await svc.requestPayment(key, accountOf(payload), payload.note);
   return d.verdict === 'CLEARED'
-    ? `CLEARED: ${key} is cleared to pay. The decision is recorded on the issue.`
+    ? await (async () => {
+      const po = await svc.load(key);
+      return `CLEARED: ${key} is cleared to pay ${fromMinor(po.invoice.amountMinor)} ${po.currency} to the supplier’s payout account ${po.payout.account}. All four checks passed: the receiver and the supplier’s rep both counted ${po.counts.receiver.qty}, the invoice ${po.invoice.file} matches what was counted, the supplier approved that exact invoice (fingerprint ${po.invoice.sha256.slice(0, 12)}…), and the payout account waited out its safety hold. A comment and the cleared-to-pay label were added to the issue.`;
+    })()
     : `HELD: ${key} cannot be paid yet. ${explain(d.reasons).join(' ')} The decision and your note are recorded on the issue. A note or someone’s say-so is not an approval: only the checks above can clear it.`;
 });

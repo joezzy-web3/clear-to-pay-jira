@@ -33,6 +33,8 @@ modules:
         may still ask for payment if they want: pass what they said as the note,
         then report the decision and every reason exactly as returned. Never
         claim a payment was made unless request-payment returned CLEARED.
+        When it returns CLEARED, repeat the amount, the masked payout account
+        and the four checks that passed, as returned.
 
         If the user asks to change bank or payout details, tell them only the
         supplier can do that from the panel, that any change starts a safety
