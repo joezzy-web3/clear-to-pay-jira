@@ -37,7 +37,10 @@ export const toMinor = (v) => {
   const s = String(v ?? '').trim().replace(/,/g, '');
   if (!/^\d+(\.\d{1,2})?$/.test(s)) throw new Error('Use an amount like 1250 or 1250.50.');
   const [w, f = ''] = s.split('.');
-  return Number(w) * 100 + Number(f.padEnd(2, '0'));
+  const m = Number(w) * 100 + Number(f.padEnd(2, '0'));
+  // Refuse amounts too large to hold exactly, rather than silently losing cents.
+  if (!Number.isSafeInteger(m) || w.replace(/^0+/, '').length > 13) throw new Error('That amount is too large.');
+  return m;
 };
 export const fromMinor = (m) => `${Math.floor(m / 100).toLocaleString('en-US')}.${String(m % 100).padStart(2, '0')}`;
 
@@ -98,12 +101,16 @@ export function roleOf(po, accountId) {
 export function checkSetup(p, { demoMode = false } = {}) {
   const need = ['supplier', 'receiver', 'rep', 'item', 'qty', 'unitPrice'];
   for (const k of need) if (p[k] === undefined || p[k] === null || p[k] === '') throw new Error(`Missing: ${k}.`);
+  for (const k of ['supplier', 'receiver', 'rep']) {
+    if (typeof p[k] !== 'string' || !p[k].trim() || p[k].length > 128) throw new Error(`The ${k === 'rep' ? 'supplier’s rep' : k} must be one person on this site.`);
+  }
   if (p.receiver === p.rep) throw new Error('The receiver and the supplier’s rep must be two different people.');
   if (p.supplier === p.receiver) throw new Error('The supplier cannot also be the receiver.');
   const qty = Number(p.qty);
   if (!Number.isInteger(qty) || qty <= 0) throw new Error('Quantity must be a whole number above zero.');
   const unitPriceMinor = toMinor(p.unitPrice);
   if (unitPriceMinor <= 0) throw new Error('Unit price must be above zero.');
+  if (!Number.isSafeInteger(qty * unitPriceMinor)) throw new Error('The order total is too large.');
   const holdHours = p.holdHours === undefined ? DEFAULT_HOLD_HOURS : Number(p.holdHours);
   if (!(holdHours > 0)) throw new Error('The payout hold must be above zero hours.');
   if (holdHours < MIN_HOLD_HOURS && !demoMode) throw new Error(`The payout hold must be at least ${MIN_HOLD_HOURS} hours. Shorter holds are only for demo mode, which a Jira admin turns on.`);

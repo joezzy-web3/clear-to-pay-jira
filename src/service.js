@@ -5,8 +5,8 @@ import * as forgeApi from '@forge/api';
 const { route } = forgeApi;
 const api = forgeApi.default?.asUser ? forgeApi.default : forgeApi.default?.default ?? forgeApi;
 import { kvs } from '@forge/kvs';
-import { createHash } from 'node:crypto';
-import { decide, checkSetup, checkBuyer, visibleCounts, roleOf, explain, toMinor, fromMinor, expectedAmount, holdEndsAt, countedQty, holdText, overDelivered, quoteData } from './rules.js';
+import { createHash, randomUUID } from 'node:crypto';
+import { decide, checkSetup, checkBuyer, visibleCounts, roleOf, explain, toMinor, fromMinor, expectedAmount, holdEndsAt, countedQty, holdText, overDelivered, quoteData, MIN_HOLD_HOURS } from './rules.js';
 
 const KEY = (issueKey) => `po:${issueKey}`;
 const MAX_LOG = 50;
@@ -30,15 +30,29 @@ const save = (issueKey, po) => kvs.set(KEY(issueKey), po);
 // so two counts at once both land, and two payment requests at once cannot both clear.
 const LOCK = (issueKey) => `lock:${issueKey}`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-export async function withLock(issueKey, fn, { tries = 40, waitMs = 100 } = {}) {
+// The lock records who holds it and until when. Forge may keep an expired key for up to 48 h,
+// and that key still blocks FAIL_IF_EXISTS, so the expiry is read from the value, not left to storage.
+const LOCK_MS = 30_000;
+const lockUntil = (v) => (v && typeof v === 'object' ? v.until : typeof v === 'number' ? v + LOCK_MS : 0);
+export async function withLock(name, fn, { tries = 40, waitMs = 100 } = {}) {
+  const key = LOCK(name);
+  const mine = { owner: randomUUID(), until: 0 };
   for (let i = 0; i < tries; i++) {
+    mine.until = Date.now() + LOCK_MS;
     try {
-      await kvs.set(LOCK(issueKey), Date.now(), { keyPolicy: 'FAIL_IF_EXISTS', ttl: { value: 30, unit: 'SECONDS' } });
+      await kvs.set(key, mine, { keyPolicy: 'FAIL_IF_EXISTS', ttl: { value: 60, unit: 'SECONDS' } });
     } catch {
+      // Taken, or a storage hiccup. A lock past its time is left by a call that died: take it over.
+      const held = await kvs.get(key).catch(() => undefined);
+      if (held !== undefined && lockUntil(held) < Date.now()) await kvs.delete(key).catch(() => {});
       await sleep(waitMs + Math.floor(Math.random() * waitMs));
       continue;
     }
-    try { return await fn(); } finally { await kvs.delete(LOCK(issueKey)); }
+    try { return await fn(); } finally {
+      // Remove the lock only if it is still ours; a slow change must not free someone else's lock.
+      // A failed release never turns a finished change into an error; the lock expires by its time.
+      try { if ((await kvs.get(key))?.owner === mine.owner) await kvs.delete(key); } catch { /* expires */ }
+    }
   }
   fail('Someone else is changing this order right now. Try again in a moment.');
 }
@@ -90,9 +104,12 @@ async function comment(issueKey, lines) {
   await api.asApp().requestJira(route`/rest/api/3/issue/${issueKey}/comment`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ body }) });
 }
 
+/** Named people must be active human accounts on this site (not deactivated, not app or bot accounts). */
 async function userExists(accountId) {
   const res = await api.asApp().requestJira(route`/rest/api/3/user?accountId=${accountId}`);
-  return res.ok;
+  if (!res.ok) return false;
+  const u = await res.json();
+  return u.active === true && u.accountType === 'atlassian';
 }
 
 async function addLabel(issueKey, label) {
@@ -113,7 +130,8 @@ async function fingerprint(attachmentId) {
 
 // ---------- what the panel and the agent see ----------
 
-export function view(po, accountId, now = Date.now()) {
+export function view(rawPo, accountId, now = Date.now(), settings = null) {
+  const po = settings ? effective(rawPo, settings) : rawPo;
   if (!po) return { exists: false };
   const d = decide(po, now);
   const exp = expectedAmount(po);
@@ -137,7 +155,8 @@ export function view(po, accountId, now = Date.now()) {
 }
 
 /** Plain-language summary for the agent. */
-export function summary(issueKey, po, now = Date.now()) {
+export function summary(issueKey, rawPo, now = Date.now(), settings = null) {
+  const po = settings ? effective(rawPo, settings) : rawPo;
   if (!po) return `${issueKey} has no Clear to Pay order yet. A buyer sets one up from the Clear to Pay panel on the issue.`;
   const d = decide(po, now);
   const q = countedQty(po);
@@ -163,7 +182,7 @@ async function setupNow(issueKey, accountId, p) {
   const clean = checkSetup(p, await getSettings());
   checkBuyer(clean, accountId);
   for (const [who, id] of [['supplier', clean.supplier], ['receiver', clean.receiver], ['supplier’s rep', clean.rep]]) {
-    if (!(await userExists(id))) fail(`The ${who} is not a user on this site.`);
+    if (!(await userExists(id))) fail(`The ${who} must be an active person on this site (not a deactivated or app account).`);
   }
   const po = { ...clean, buyer: accountId, counts: {}, createdAt: Date.now() };
   log(po, { by: accountId, what: `Order set up: ${po.qty} × ${po.item} at ${fromMinor(po.unitPriceMinor)} ${po.currency}. Payout hold ${holdText(po.holdHours)}.` });
@@ -214,12 +233,13 @@ async function recordInvoiceNow(issueKey, accountId, { attachmentId, filename, a
   if (po.supplierApproval) fail('The supplier already approved an invoice. It cannot be swapped now.');
   const files = await attachments(issueKey);
   const a = files.find((f) => (attachmentId && f.id === String(attachmentId)) || (filename && f.filename === filename))
-    ?? fail(`No attachment ${filename ?? attachmentId} on ${issueKey}. Attach the invoice to the issue first.`);
+    ?? fail(`No attachment ${quoteData(filename ?? attachmentId)} on ${issueKey}. Attach the invoice to the issue first.`);
   const amountMinor = toMinor(amount);
   if (amountMinor <= 0) fail('The invoice amount must be above zero.');
   const sha256 = await fingerprint(a.id);
   if (po.invoice && po.invoice.sha256 !== sha256 && (await kvs.get(INV(po.invoice.sha256))) === issueKey) await kvs.delete(INV(po.invoice.sha256));
-  if (!(await kvs.get(INV(sha256)))) await kvs.set(INV(sha256), issueKey);
+  // Claim the file in one step: of two orders recording it at once, only one can create the claim.
+  try { await kvs.set(INV(sha256), issueKey, { keyPolicy: 'FAIL_IF_EXISTS' }); } catch { /* already claimed; findDuplicates reads the owner */ }
   po.invoice = { file: a.filename, attachmentId: a.id, sha256, amountMinor, by: accountId ?? 'agent', at: Date.now() };
   log(po, { by: accountId ?? 'agent', what: `Invoice recorded: ${a.filename}, ${fromMinor(amountMinor)} ${po.currency}, fingerprint ${sha256.slice(0, 12)}….` });
   po.duplicate = await findDuplicates(issueKey, po);
@@ -271,25 +291,30 @@ async function confirmSeparateNow(issueKey, accountId) {
 }
 
 /** Anyone may ask; only the rules decide. The request and its note are recorded either way. */
+/** A short demo hold only counts while demo mode is on. Once an admin turns it off, the order waits the full minimum. */
+export const effective = (po, settings) => (po && po.holdHours < MIN_HOLD_HOURS && !settings?.demoMode ? { ...po, holdHours: MIN_HOLD_HOURS } : po);
+
 async function requestPaymentNow(issueKey, accountId, note = '') {
   const po = await load(issueKey) ?? fail('No order on this issue.');
   if (po.invoice && !po.paid) po.duplicate = await findDuplicates(issueKey, po);
-  const d = decide(po);
+  const d = decide(effective(po, await getSettings()));
+  if (po.paid) d.paidAt = po.paid.at;
   const who = accountId ?? 'agent';
-  const said = String(note ?? '').trim().slice(0, 300);
+  const said = note ? quoteData(note, 300) : '';
   if (d.verdict === 'CLEARED') {
     po.paid = { at: Date.now(), by: who, amountMinor: po.invoice.amountMinor };
-    log(po, { by: who, what: `Payment requested${said ? ` (“${said}”)` : ''}: CLEARED. ${fromMinor(po.invoice.amountMinor)} ${po.currency} to ${po.payout.account}.` });
+    log(po, { by: who, what: `Payment requested${said ? ` (${said})` : ''}: CLEARED. ${fromMinor(po.invoice.amountMinor)} ${po.currency} to ${po.payout.account}.` });
     await save(issueKey, po);
+    // Saved as paid. Nothing below may turn that into an error for the caller.
     const pk = PAID(po.supplier, po.invoice.amountMinor);
-    await kvs.set(pk, [{ key: issueKey, at: Date.now() }, ...((await kvs.get(pk)) ?? [])].slice(0, 20));
+    try { await kvs.set(pk, [{ key: issueKey, at: Date.now() }, ...((await kvs.get(pk)) ?? [])].slice(0, 50)); } catch { d.note = 'The duplicate-check record could not be written.'; }
     // The decision is saved. If Jira refuses the label or comment, the payment is still cleared.
     try { await addLabel(issueKey, 'cleared-to-pay'); } catch { d.note = 'The cleared-to-pay label could not be added.'; }
     try { await comment(issueKey, ['Clear to Pay: CLEARED TO PAY', `${fromMinor(po.invoice.amountMinor)} ${po.currency} to the supplier’s payout account ${po.payout.account}. Counts agreed, the invoice matches what was counted, the supplier approved this exact invoice (fingerprint ${po.invoice.sha256.slice(0, 12)}…), and the payout account has waited out its hold.`]); } catch { d.note = 'The Jira comment could not be added.'; }
   } else {
-    log(po, { by: who, what: `Payment requested${said ? ` (“${said}”)` : ''}: HELD. ${explain(d.reasons).join(' ')}` });
+    log(po, { by: who, what: `Payment requested${said ? ` (${said})` : ''}: HELD. ${explain(d.reasons).join(' ')}` });
     await save(issueKey, po);
-    await comment(issueKey, ['Clear to Pay: HELD', ...(said ? [`Request note: “${said}”. A note is not an approval.`] : []), ...explain(d.reasons)]);
+    try { await comment(issueKey, ['Clear to Pay: HELD', ...(said ? [`Request note: ${said}. A note is not an approval.`] : []), ...explain(d.reasons)]); } catch { /* the decision is saved */ }
   }
   return d;
 }
@@ -303,4 +328,9 @@ export const recordInvoice = (issueKey, ...rest) => withLock(issueKey, () => rec
 export const approveInvoice = (issueKey, ...rest) => withLock(issueKey, () => approveInvoiceNow(issueKey, ...rest));
 export const setPayout = (issueKey, ...rest) => withLock(issueKey, () => setPayoutNow(issueKey, ...rest));
 export const confirmSeparate = (issueKey, ...rest) => withLock(issueKey, () => confirmSeparateNow(issueKey, ...rest));
-export const requestPayment = (issueKey, ...rest) => withLock(issueKey, () => requestPaymentNow(issueKey, ...rest));
+// Payment takes the order's lock, then the supplier's (always in that order), so two orders for the
+// same supplier and amount cannot both pass the "paid recently" check at the same moment.
+export const requestPayment = async (issueKey, ...rest) => {
+  const supplier = (await load(issueKey))?.supplier;
+  return withLock(issueKey, () => (supplier ? withLock(`sup:${supplier}`, () => requestPaymentNow(issueKey, ...rest)) : requestPaymentNow(issueKey, ...rest)));
+};

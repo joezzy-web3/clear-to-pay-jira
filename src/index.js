@@ -11,7 +11,12 @@ const issueOf = (req) => { const k = req.context.extension?.issue?.key; if (!k) 
 const wrap = (fn) => async (req) => {
   try { return { ok: true, ...(await fn(req)) }; } catch (e) { return { ok: false, error: e instanceof svc.UserError ? e.message : 'Something went wrong. Try again.' }; }
 };
-const state = async (key, accountId) => ({ state: svc.view(await svc.load(key), accountId), attachments: await svc.attachments(key), settings: { demoMode: (await svc.getSettings()).demoMode } });
+const state = async (key, accountId) => {
+  const settings = await svc.getSettings();
+  // A missing attachment list must never hide the order or a decision just made.
+  const attachments = await svc.attachments(key).catch(() => []);
+  return { state: svc.view(await svc.load(key), accountId, Date.now(), settings), attachments, settings: { demoMode: settings.demoMode } };
+};
 
 resolver.define('getState', wrap(async (req) => state(issueOf(req), req.context.accountId)));
 resolver.define('setup', wrap(async (req) => { await svc.setup(issueOf(req), req.context.accountId, req.payload); return state(issueOf(req), req.context.accountId); }));
@@ -34,18 +39,22 @@ export const adminHandler = admin.getDefinitions();
 
 // ---------- Rovo actions / MCP tools ----------
 // Each answers in plain text. They run with the asking user's view of Jira.
-// The caller comes from the function's context argument (where Forge documents it), falling back to the payload.
-const accountOf = (payload, ctx) => ctx?.principal?.accountId ?? ctx?.accountId ?? payload?.context?.accountId ?? null;
+// The caller comes only from the function's context argument, where Forge puts it. Action inputs can be
+// made up by the model or an MCP client, so they never decide who is asking.
+const accountOf = (payload, ctx) => ctx?.principal?.accountId ?? null;
 const text = (fn) => async (payload, ctx) => {
   try { return await fn(payload, ctx); } catch (e) { return e instanceof svc.UserError ? `VERDICT: NOT DONE\nCould not do that: ${e.message}` : 'VERDICT: NOT DONE\nSomething went wrong. Try again.'; }
 };
 /** Actions that change an order must know who is asking, so the audit trail and role checks are real. */
-const callerOf = (payload, ctx) => accountOf(payload, ctx) ?? (() => { throw new svc.UserError('I could not tell who is asking, so I will not change this order. Use the Clear to Pay panel on the issue.'); })();
+const callerOf = (payload, ctx) => accountOf(payload, ctx) ?? (() => {
+  // Field names only, never values: shows in forge logs if Rovo ever puts the caller elsewhere.
+  console.warn('Clear to Pay: no caller in context. Context fields:', Object.keys(ctx ?? {}).join(', '), '| principal fields:', Object.keys(ctx?.principal ?? {}).join(', '));
+  throw new svc.UserError('I could not tell who is asking, so I will not change this order. Use the Clear to Pay panel on the issue.'); })();
 
 export const getOrder = text(async (payload) => {
   const key = svc.checkIssueKey(payload.issueKey);
   await svc.assertCanSee(key);
-  return svc.summary(key, await svc.load(key));
+  return svc.summary(key, await svc.load(key), Date.now(), await svc.getSettings());
 });
 
 export const checkInvoice = text(async (payload) => {
@@ -54,7 +63,7 @@ export const checkInvoice = text(async (payload) => {
   const po = await svc.load(key);
   if (!po) return `${key} has no Clear to Pay order yet.`;
   const exp = expectedAmount(po);
-  const d = decide(po);
+  const d = decide(svc.effective(po, await svc.getSettings()));
   const match = !po.invoice ? 'No invoice is recorded yet.'
     : exp === null ? `Invoice asks for ${fromMinor(po.invoice.amountMinor)} ${po.currency}; the counted value is not known until both gate counts are in and agree.`
       : po.invoice.amountMinor === exp ? `Three-way match: order, counted delivery and invoice agree at ${fromMinor(exp)} ${po.currency}.`
@@ -73,6 +82,7 @@ export const requestPayment = text(async (payload, ctx) => {
   const key = svc.checkIssueKey(payload.issueKey);
   await svc.assertCanSee(key);
   const d = await svc.requestPayment(key, callerOf(payload, ctx), payload.note);
+  if (d.paidAt) return `VERDICT: ALREADY CLEARED\n${key} was already cleared to pay on ${new Date(d.paidAt).toISOString().slice(0, 10)}. It cannot be paid twice, and nothing was changed.`;
   return d.verdict === 'CLEARED'
     ? await (async () => {
       const po = await svc.load(key);

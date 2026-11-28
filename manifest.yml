@@ -41,7 +41,8 @@ modules:
         (only words the user actually wrote; if they gave no reason, leave the
         note empty and never make one up),
         then report the decision and every reason exactly as returned. Never
-        claim a payment was made unless request-payment returned CLEARED.
+        claim a payment was made unless request-payment returned CLEARED or
+        ALREADY CLEARED.
         When it returns CLEARED, repeat the amount, the masked payout account
         and the four checks that passed, as returned.
 

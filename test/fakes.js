@@ -7,11 +7,11 @@ export function makeFakes() {
   const calls = [];
   const files = new Map(); // issueKey -> [{ id, filename, bytes }]
   const kvs = {
-    async get(k) { await tick(); return structuredClone(store.get(k)); },
+    async get(k) { await tick(); const v = store.get(k); return v === undefined ? undefined : JSON.parse(JSON.stringify(v)); },
     async set(k, v, opts) {
       await tick();
       if (opts?.keyPolicy === 'FAIL_IF_EXISTS' && store.has(k)) throw new Error('KEY_ALREADY_EXISTS');
-      store.set(k, structuredClone(v));
+      store.set(k, JSON.parse(JSON.stringify(v)));
     },
     async delete(k) { await tick(); store.delete(k); },
   };
@@ -27,7 +27,7 @@ export function makeFakes() {
     if ((m = url.match(/\/rest\/api\/3\/issue\/([A-Z0-9_]+-\d+)\?fields=attachment/))) {
       return ok({ fields: { attachment: (files.get(m[1]) ?? []).map((f) => ({ id: f.id, filename: f.filename, size: f.bytes.length, created: 'now' })) } });
     }
-    if (/\/rest\/api\/3\/user\?accountId=/.test(url)) return ok({ accountId: 'x', active: true });
+    if (/\/rest\/api\/3\/user\?accountId=/.test(url)) return ok({ accountId: 'x', active: true, accountType: 'atlassian' });
     if (/\/rest\/api\/3\/mypermissions/.test(url)) return ok({ permissions: { ADMINISTER: { havePermission: true } } });
     return ok({ fields: { summary: 'An issue' } });
   };
