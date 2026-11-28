@@ -57,7 +57,7 @@ function Counts({ s, run }) {
   );
 }
 
-function Invoice({ s, attachments, run }) {
+function Invoice({ s, attachments, run, isAdmin }) {
   const [pick, setPick] = useState(null);
   const [amount, setAmount] = useState('');
   const [replacing, setReplacing] = useState(false);
@@ -69,7 +69,16 @@ function Invoice({ s, attachments, run }) {
         {s.invoice ? (
           <Text><Strong>{s.invoice.file}</Strong> for {s.invoice.amount} {s.currency} · fingerprint {s.invoice.sha256.slice(0, 12)}…</Text>
         ) : <Text>No invoice recorded. Attach the supplier’s invoice to this issue, then record it here, or ask the Clear to Pay agent in Rovo.</Text>}
-        {s.duplicate?.sameFile ? <SectionMessage appearance="error" title="Duplicate invoice"><Text>This exact file is already on {s.duplicate.sameFile}. One invoice can only be paid once. Replace it with the right invoice.</Text></SectionMessage> : null}
+        {s.duplicate?.sameFile ? (
+          <SectionMessage appearance="error" title="Duplicate invoice">
+            <Text>This exact file is already approved on {s.duplicate.sameFile}. One invoice can only be paid once. Replace it with the right invoice.</Text>
+            {isAdmin && !s.paid ? <Button onClick={() => run('releaseClaim')}>Release it from {s.duplicate.sameFile} (admin)</Button> : null}
+          </SectionMessage>
+        ) : s.duplicate?.alsoOn?.length && !s.approval ? (
+          <SectionMessage appearance="warning" title="Same invoice on another order">
+            <Text>This exact file is also recorded on {s.duplicate.alsoOn.join(', ')}. Only one order can have it approved. If this order is the mistake, withdraw it here.</Text>
+          </SectionMessage>
+        ) : null}
         {!s.duplicate?.sameFile && s.duplicate?.similar?.length ? (
           <SectionMessage appearance={s.duplicate.confirmed ? 'information' : 'warning'} title={s.duplicate.confirmed ? 'Confirmed as a separate invoice' : 'Possible duplicate'}>
             <Text>This supplier was paid the same amount on {s.duplicate.similar.join(', ')} in the last 30 days.</Text>
@@ -87,9 +96,15 @@ function Invoice({ s, attachments, run }) {
           </Inline>
         ) : null}
         {s.approval ? <Text>✅ Approved by the supplier for <Strong>{s.approval.amount} {s.currency}</Strong>.</Text>
-          : s.invoice && s.roles.includes('supplier') ? <Button appearance="primary" onClick={() => run('approve')}>Approve this invoice and amount</Button>
-            : s.invoice ? <Text>Waiting for the supplier to approve this invoice and amount.</Text> : null}
-        {s.invoice && !s.approval && !s.paid && !replacing ? <Button appearance="subtle" onClick={() => setReplacing(true)}>Replace the invoice</Button> : null}
+          : s.duplicate?.sameFile ? null
+            : s.invoice && s.roles.includes('supplier') ? <Button appearance="primary" onClick={() => run('approve')}>Approve this invoice and amount</Button>
+              : s.invoice ? <Text>Waiting for the supplier to approve this invoice and amount.</Text> : null}
+        {s.invoice && !s.approval && !s.paid && !replacing ? (
+          <Inline space="space.100">
+            <Button appearance="subtle" onClick={() => setReplacing(true)}>Replace the invoice</Button>
+            {s.roles.includes('buyer') ? <Button appearance="subtle" onClick={() => run('withdrawInvoice')}>Withdraw the invoice</Button> : null}
+          </Inline>
+        ) : null}
       </Stack>
     </Box>
   );
@@ -115,6 +130,8 @@ function Payout({ s, run }) {
 }
 
 const DONE = {
+  withdrawInvoice: () => 'Invoice withdrawn. You can record the right one.',
+  releaseClaim: () => 'Released. The other order lost this invoice and its approval, and both orders log it.',
   setup: () => 'Order set up. Next: the receiver and the supplier’s rep each count the delivery at the gate.',
   count: () => 'Your count is sealed. The other count stays hidden until both are in.',
   resetCounts: () => 'Counts cleared. Both sides count again.',
@@ -177,7 +194,7 @@ function App() {
           <Inline space="space.200"><Text>Supplier</Text><User accountId={s.people.supplier} /><Text>Receiver</Text><User accountId={s.people.receiver} /><Text>Rep</Text><User accountId={s.people.rep} /></Inline>
           {s.roles.includes('buyer') && !s.counts.receiver && !s.counts.rep && !s.invoice ? <Button appearance="subtle" onClick={() => run('cancel')}>Cancel this order</Button> : null}
           <Counts s={s} run={run} />
-          <Invoice s={s} attachments={st.attachments} run={run} />
+          <Invoice s={s} attachments={st.attachments} run={run} isAdmin={st.isAdmin} />
           <Payout s={s} run={run} />
           {!s.paid ? (
             <Box xcss={card}>

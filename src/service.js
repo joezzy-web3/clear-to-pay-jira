@@ -75,7 +75,8 @@ export async function setDemoMode(accountId, on) {
 // ---------- duplicate-invoice index (across all orders) ----------
 // inv:<sha256>               -> the issue that holds that exact invoice file
 // paid:<supplier>:<amount>   -> recent payments to that supplier for that amount
-const INV = (sha) => `inv:${sha}`;
+const INV = (sha) => `inv:${sha}`;       // the order whose supplier APPROVED this exact file (the claim)
+const SEEN = (sha) => `seen:${sha}`;     // orders that recorded this file, approved or not (an early warning only)
 const PAID = (supplier, amountMinor) => `paid:${supplier}:${amountMinor}`;
 const SIMILAR_DAYS = 30;
 
@@ -85,7 +86,8 @@ async function findDuplicates(issueKey, po, now = Date.now()) {
   const sameFile = owner && owner !== issueKey ? owner : null;
   const recent = (await kvs.get(PAID(po.supplier, po.invoice.amountMinor))) ?? [];
   const similar = recent.filter((p) => p.key !== issueKey && now - p.at < SIMILAR_DAYS * 24 * 3_600_000);
-  return { sameFile, similar, confirmed: po.duplicate?.confirmed ?? null };
+  const alsoOn = ((await kvs.get(SEEN(po.invoice.sha256))) ?? []).filter((k) => k !== issueKey && k !== sameFile);
+  return { sameFile, alsoOn, similar, confirmed: po.duplicate?.confirmed ?? null };
 }
 
 function log(po, entry) {
@@ -147,7 +149,7 @@ export function view(rawPo, accountId, now = Date.now(), settings = null) {
     invoice: po.invoice ? { file: po.invoice.file, amount: fromMinor(po.invoice.amountMinor), sha256: po.invoice.sha256, by: po.invoice.by, at: po.invoice.at } : null,
     approval: po.supplierApproval ? { amount: fromMinor(po.supplierApproval.amountMinor), sha256: po.supplierApproval.sha256, at: po.supplierApproval.at } : null,
     payout: po.payout ? { account: po.payout.account, setAt: po.payout.setAt, holdEndsAt: holdEndsAt(po) } : null,
-    duplicate: po.duplicate ? { sameFile: po.duplicate.sameFile, similar: po.duplicate.similar.map((p) => p.key), confirmed: Boolean(po.invoice && po.duplicate.confirmed?.sha256 === po.invoice.sha256) } : null,
+    duplicate: po.duplicate ? { sameFile: po.duplicate.sameFile, alsoOn: po.duplicate.alsoOn ?? [], similar: po.duplicate.similar.map((p) => p.key), confirmed: Boolean(po.invoice && po.duplicate.confirmed?.sha256 === po.invoice.sha256) } : null,
     paid: Boolean(po.paid),
     decision: { verdict: d.verdict, reasons: d.reasons, explained: explain(d.reasons) },
     log: po.log ?? [],
@@ -167,7 +169,7 @@ export function summary(issueKey, rawPo, now = Date.now(), settings = null) {
     `Gate counts: ${po.counts?.receiver && po.counts?.rep ? (q === null ? 'both in, and they DIFFER' : `both in, agreed: ${q}`) : `${[po.counts?.receiver && 'receiver', po.counts?.rep && 'supplier’s rep'].filter(Boolean).join(' and ') || 'none'} in so far (each stays sealed until both are in)`}.`,
     ...(overDelivered(po) ? [`More was counted than ordered (${overDelivered(po)} extra). Only what was ordered is payable; the buyer raises a change order for the rest.`] : []),
     `Invoice: ${po.invoice ? `${quoteData(po.invoice.file)}, ${fromMinor(po.invoice.amountMinor)} ${po.currency}, fingerprint ${po.invoice.sha256.slice(0, 12)}…` : 'none recorded'}${exp !== null ? `; the counted delivery is worth ${fromMinor(exp)} ${po.currency}` : ''}.`,
-    ...(po.duplicate?.sameFile ? [`DUPLICATE: this exact invoice file is already on ${po.duplicate.sameFile}.`] : po.duplicate?.similar?.length ? [`Possible duplicate: this supplier was paid the same amount on ${po.duplicate.similar.map((p) => p.key).join(', ')} in the last 30 days${po.duplicate.confirmed ? '; the buyer confirmed this is a separate invoice' : '; the buyer has not confirmed it is separate'}.`] : []),
+    ...(po.duplicate?.sameFile ? [`DUPLICATE: this exact invoice file is already approved on ${po.duplicate.sameFile}.`] : po.duplicate?.alsoOn?.length ? [`Warning: this exact invoice file is also recorded on ${po.duplicate.alsoOn.join(', ')}. Only one of them can have it approved.`] : po.duplicate?.similar?.length ? [`Possible duplicate: this supplier was paid the same amount on ${po.duplicate.similar.map((p) => p.key).join(', ')} in the last 30 days${po.duplicate.confirmed ? '; the buyer confirmed this is a separate invoice' : '; the buyer has not confirmed it is separate'}.`] : []),
     `Supplier approval: ${po.supplierApproval ? `yes, for ${fromMinor(po.supplierApproval.amountMinor)} ${po.currency}` : 'not yet'}.`,
     `Payout account: ${po.payout ? `${po.payout.account}, ${now < holdEndsAt(po) ? `in its safety hold until ${new Date(holdEndsAt(po)).toISOString()}` : 'hold passed'}` : 'not set'}.`,
     po.paid ? 'Status: CLEARED TO PAY (already decided).' : `If payment were requested now: ${d.verdict}${d.reasons.length ? ` — ${explain(d.reasons).join(' ')}` : '.'}`,
@@ -231,29 +233,86 @@ async function recordInvoiceNow(issueKey, accountId, { attachmentId, filename, a
   const po = await load(issueKey) ?? fail('No order on this issue.');
   if (po.paid) fail('This order is already cleared to pay.');
   if (po.supplierApproval) fail('The supplier already approved an invoice. It cannot be swapped now.');
+  if (![po.buyer, po.receiver, po.supplier].includes(accountId)) fail('Only the buyer, the receiver or the supplier can record the invoice.');
   const files = await attachments(issueKey);
   const a = files.find((f) => (attachmentId && f.id === String(attachmentId)) || (filename && f.filename === filename))
     ?? fail(`No attachment ${quoteData(filename ?? attachmentId)} on ${issueKey}. Attach the invoice to the issue first.`);
   const amountMinor = toMinor(amount);
   if (amountMinor <= 0) fail('The invoice amount must be above zero.');
   const sha256 = await fingerprint(a.id);
-  if (po.invoice && po.invoice.sha256 !== sha256 && (await kvs.get(INV(po.invoice.sha256))) === issueKey) await kvs.delete(INV(po.invoice.sha256));
-  // Claim the file in one step: of two orders recording it at once, only one can create the claim.
-  try { await kvs.set(INV(sha256), issueKey, { keyPolicy: 'FAIL_IF_EXISTS' }); } catch { /* already claimed; findDuplicates reads the owner */ }
-  po.invoice = { file: a.filename, attachmentId: a.id, sha256, amountMinor, by: accountId ?? 'agent', at: Date.now() };
-  log(po, { by: accountId ?? 'agent', what: `Invoice recorded: ${a.filename}, ${fromMinor(amountMinor)} ${po.currency}, fingerprint ${sha256.slice(0, 12)}….` });
+  if (po.invoice && po.invoice.sha256 !== sha256) await unsee(po.invoice.sha256, issueKey);
+  // The file is claimed only when the supplier approves it (see approveInvoice). Recording it just
+  // notes where it has been seen, so a second order using the same file is warned straight away.
+  await see(sha256, issueKey);
+  po.invoice = { file: a.filename, attachmentId: a.id, sha256, amountMinor, by: accountId, at: Date.now() };
+  log(po, { by: accountId, what: `Invoice recorded: ${a.filename}, ${fromMinor(amountMinor)} ${po.currency}, fingerprint ${sha256.slice(0, 12)}….` });
   po.duplicate = await findDuplicates(issueKey, po);
-  if (po.duplicate.sameFile) log(po, { by: 'clear-to-pay', what: `DUPLICATE: this exact invoice file is already on ${po.duplicate.sameFile}. Payment is held.` });
+  if (po.duplicate.sameFile) log(po, { by: 'clear-to-pay', what: `DUPLICATE: this exact invoice file is already approved on ${po.duplicate.sameFile}. Payment is held.` });
+  else if (po.duplicate.alsoOn.length) log(po, { by: 'clear-to-pay', what: `Warning: this exact invoice file is also recorded on ${po.duplicate.alsoOn.join(', ')}. Only one order can have it approved.` });
   else if (po.duplicate.similar.length) log(po, { by: 'clear-to-pay', what: `Possible duplicate: this supplier was paid ${fromMinor(amountMinor)} ${po.currency} on ${po.duplicate.similar.map((p) => p.key).join(', ')} in the last 30 days.` });
   await save(issueKey, po);
-  if (po.duplicate.sameFile) await comment(issueKey, ['Clear to Pay: duplicate invoice', `This exact invoice file is already recorded on ${po.duplicate.sameFile}. One invoice can only be paid once, so this order is held.`]);
+  if (po.duplicate.sameFile || po.duplicate.alsoOn.length) {
+    const where = po.duplicate.sameFile ? `already approved on ${po.duplicate.sameFile}` : `also recorded on ${po.duplicate.alsoOn.join(', ')}`;
+    try { await comment(issueKey, ['Clear to Pay: duplicate invoice', `This exact invoice file is ${where}. One invoice can only be paid once.`]); } catch { /* recorded either way */ }
+  }
   return po;
+}
+
+async function see(sha, issueKey) {
+  const list = (await kvs.get(SEEN(sha))) ?? [];
+  if (!list.includes(issueKey)) await kvs.set(SEEN(sha), [...list, issueKey].slice(-50));
+}
+async function unsee(sha, issueKey) {
+  const list = (await kvs.get(SEEN(sha))) ?? [];
+  if (list.includes(issueKey)) await kvs.set(SEEN(sha), list.filter((k) => k !== issueKey));
+}
+
+/** The buyer takes back an invoice recorded by mistake, before the supplier approves it. */
+async function withdrawInvoiceNow(issueKey, accountId) {
+  const po = await load(issueKey) ?? fail('No order on this issue.');
+  if (accountId !== po.buyer) fail('Only the buyer can withdraw the invoice.');
+  if (!po.invoice) fail('There is no invoice to withdraw.');
+  if (po.supplierApproval || po.paid) fail('The supplier already approved this invoice, so it cannot be withdrawn here.');
+  await unsee(po.invoice.sha256, issueKey);
+  log(po, { by: accountId, what: `Buyer withdrew the invoice ${po.invoice.file}.` });
+  po.invoice = null;
+  po.duplicate = null;
+  await save(issueKey, po);
+  return po;
+}
+
+/** A Jira admin frees an invoice file held by another order that has not been paid (for example, someone
+ *  recorded and approved a copy on the wrong order). That order loses its invoice and approval; both orders log it. */
+async function releaseClaimNow(holder, accountId, { forOrder } = {}) {
+  const po = await load(holder) ?? fail('The order holding this invoice no longer exists.');
+  if (po.paid) fail(`${holder} was already paid with this invoice. That cannot be released.`);
+  if (!po.invoice) fail(`${holder} has no invoice.`);
+  const sha = po.invoice.sha256;
+  if ((await kvs.get(INV(sha))) === holder) await kvs.delete(INV(sha));
+  await unsee(sha, holder);
+  log(po, { by: accountId, what: `A Jira admin released this order's invoice ${po.invoice.file}${forOrder ? ` so it can be used on ${forOrder}` : ''}. The invoice and the supplier's approval were removed.` });
+  po.invoice = null; po.supplierApproval = null; po.duplicate = null;
+  await save(holder, po);
+  try { await comment(holder, ['Clear to Pay: invoice released by an admin', `The invoice and the supplier’s approval on this order were removed${forOrder ? ` so the file can be used on ${forOrder}` : ''}. Record the right invoice to continue.`]); } catch { /* logged */ }
+  return sha;
 }
 
 async function approveInvoiceNow(issueKey, accountId) {
   const po = await load(issueKey) ?? fail('No order on this issue.');
   if (accountId !== po.supplier) fail('Only the supplier can approve its invoice.');
   if (!po.invoice) fail('There is no invoice to approve yet.');
+  // Claim this exact file for this order. If another order's supplier already approved it, refuse.
+  try {
+    await kvs.set(INV(po.invoice.sha256), issueKey, { keyPolicy: 'FAIL_IF_EXISTS' });
+  } catch {
+    const owner = await kvs.get(INV(po.invoice.sha256));
+    if (owner && owner !== issueKey) {
+      po.duplicate = await findDuplicates(issueKey, po);
+      await save(issueKey, po);
+      fail(`This exact invoice is already approved on ${owner}. One invoice can only be paid once.`);
+    }
+    if (!owner) await kvs.set(INV(po.invoice.sha256), issueKey); // the claim key had just been removed
+  }
   po.supplierApproval = { sha256: po.invoice.sha256, amountMinor: po.invoice.amountMinor, at: Date.now() };
   log(po, { by: accountId, what: `Supplier approved ${po.invoice.file} for ${fromMinor(po.invoice.amountMinor)} ${po.currency}.` });
   await save(issueKey, po);
@@ -327,6 +386,23 @@ export const resetCounts = (issueKey, ...rest) => withLock(issueKey, () => reset
 export const recordInvoice = (issueKey, ...rest) => withLock(issueKey, () => recordInvoiceNow(issueKey, ...rest));
 export const approveInvoice = (issueKey, ...rest) => withLock(issueKey, () => approveInvoiceNow(issueKey, ...rest));
 export const setPayout = (issueKey, ...rest) => withLock(issueKey, () => setPayoutNow(issueKey, ...rest));
+export const withdrawInvoice = (issueKey, ...rest) => withLock(issueKey, () => withdrawInvoiceNow(issueKey, ...rest));
+/** Admin only. Releases the claim held by another order, then refreshes this order's duplicate check. */
+export async function releaseClaim(issueKey, accountId) {
+  if (!(await isJiraAdmin())) fail('Only a Jira admin can release an invoice held by another order.');
+  const po = await load(issueKey) ?? fail('No order on this issue.');
+  if (!po.invoice) fail('There is no invoice on this order.');
+  const holder = await kvs.get(INV(po.invoice.sha256));
+  if (!holder || holder === issueKey) fail('No other order holds this invoice.');
+  await withLock(holder, () => releaseClaimNow(holder, accountId, { forOrder: issueKey }));
+  return withLock(issueKey, async () => {
+    const fresh = await load(issueKey);
+    fresh.duplicate = await findDuplicates(issueKey, fresh);
+    log(fresh, { by: accountId, what: `A Jira admin released this invoice from ${holder}.` });
+    await save(issueKey, fresh);
+    return fresh;
+  });
+}
 export const confirmSeparate = (issueKey, ...rest) => withLock(issueKey, () => confirmSeparateNow(issueKey, ...rest));
 // Payment takes the order's lock, then the supplier's (always in that order), so two orders for the
 // same supplier and amount cannot both pass the "paid recently" check at the same moment.

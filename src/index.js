@@ -15,7 +15,10 @@ const state = async (key, accountId) => {
   const settings = await svc.getSettings();
   // A missing attachment list must never hide the order or a decision just made.
   const attachments = await svc.attachments(key).catch(() => []);
-  return { state: svc.view(await svc.load(key), accountId, Date.now(), settings), attachments, settings: { demoMode: settings.demoMode } };
+  const view = svc.view(await svc.load(key), accountId, Date.now(), settings);
+  // Only asked when it matters: an admin can release an invoice held by another order.
+  const isAdmin = view?.duplicate?.sameFile ? await svc.isJiraAdmin().catch(() => false) : false;
+  return { state: view, attachments, settings: { demoMode: settings.demoMode }, isAdmin };
 };
 
 resolver.define('getState', wrap(async (req) => state(issueOf(req), req.context.accountId)));
@@ -25,6 +28,8 @@ resolver.define('count', wrap(async (req) => { await svc.submitCount(issueOf(req
 resolver.define('resetCounts', wrap(async (req) => { await svc.resetCounts(issueOf(req), req.context.accountId); return state(issueOf(req), req.context.accountId); }));
 resolver.define('recordInvoice', wrap(async (req) => { await svc.recordInvoice(issueOf(req), req.context.accountId, req.payload); return state(issueOf(req), req.context.accountId); }));
 resolver.define('approve', wrap(async (req) => { await svc.approveInvoice(issueOf(req), req.context.accountId); return state(issueOf(req), req.context.accountId); }));
+resolver.define('withdrawInvoice', wrap(async (req) => { await svc.withdrawInvoice(issueOf(req), req.context.accountId); return state(issueOf(req), req.context.accountId); }));
+resolver.define('releaseClaim', wrap(async (req) => { await svc.releaseClaim(issueOf(req), req.context.accountId); return state(issueOf(req), req.context.accountId); }));
 resolver.define('confirmSeparate', wrap(async (req) => { await svc.confirmSeparate(issueOf(req), req.context.accountId); return state(issueOf(req), req.context.accountId); }));
 resolver.define('setPayout', wrap(async (req) => { await svc.setPayout(issueOf(req), req.context.accountId, req.payload.account); return state(issueOf(req), req.context.accountId); }));
 resolver.define('requestPayment', wrap(async (req) => { const d = await svc.requestPayment(issueOf(req), req.context.accountId, req.payload?.note); return { decision: d, ...(await state(issueOf(req), req.context.accountId)) }; }));

@@ -81,3 +81,60 @@ test('duplicate: the same invoice file on a second order is held', async () => {
   await svc.recordInvoice('PO-2', 'B', { attachmentId: '11', amount: '200.00' });
   assert.equal((await svc.load('PO-2')).duplicate.sameFile, K);
 });
+
+// ---------- A6: who may record, claim on approval, withdraw, admin release ----------
+
+test('A6: the supplier’s rep cannot record the invoice', async () => {
+  await svc.setup(K, 'B', order);
+  f.files.set(K, [{ id: '10', filename: 'inv.pdf', bytes: 'x' }]);
+  await assert.rejects(svc.recordInvoice(K, 'P', { attachmentId: '10', amount: '200.00' }), /Only the buyer, the receiver or the supplier/);
+  await svc.recordInvoice(K, 'R', { attachmentId: '10', amount: '200.00' });
+});
+
+test('A6: recording a copy does not lock the real order out; only an approval claims the file', async () => {
+  await svc.setup('PO-9', 'B', order); // a stray order records a copy first
+  f.files.set('PO-9', [{ id: '90', filename: 'copy.pdf', bytes: 'the invoice' }]);
+  await svc.recordInvoice('PO-9', 'B', { attachmentId: '90', amount: '200.00' });
+  await svc.setup(K, 'B', order);
+  f.files.set(K, [{ id: '10', filename: 'inv.pdf', bytes: 'the invoice' }]);
+  await svc.recordInvoice(K, 'B', { attachmentId: '10', amount: '200.00' });
+  assert.equal((await svc.load(K)).duplicate.sameFile, null);
+  await svc.approveInvoice(K, 'S');
+  await assert.rejects(svc.approveInvoice('PO-9', 'S'), /already approved on PO-1/);
+});
+
+test('A6: the buyer can withdraw an invoice before approval, not after', async () => {
+  await svc.setup(K, 'B', order);
+  f.files.set(K, [{ id: '10', filename: 'inv.pdf', bytes: 'x' }]);
+  await svc.recordInvoice(K, 'B', { attachmentId: '10', amount: '200.00' });
+  await assert.rejects(svc.withdrawInvoice(K, 'R'), /Only the buyer/);
+  await svc.withdrawInvoice(K, 'B');
+  assert.equal((await svc.load(K)).invoice, null);
+  await svc.recordInvoice(K, 'B', { attachmentId: '10', amount: '200.00' });
+  await svc.approveInvoice(K, 'S');
+  await assert.rejects(svc.withdrawInvoice(K, 'B'), /already approved/);
+});
+
+test('A6: an admin can release a file held by an unpaid order, never one already paid', async () => {
+  await svc.setup('PO-9', 'B', order);
+  f.files.set('PO-9', [{ id: '90', filename: 'copy.pdf', bytes: 'the invoice' }]);
+  await svc.recordInvoice('PO-9', 'B', { attachmentId: '90', amount: '200.00' });
+  await svc.approveInvoice('PO-9', 'S');
+  await svc.setup(K, 'B', order);
+  f.files.set(K, [{ id: '10', filename: 'inv.pdf', bytes: 'the invoice' }]);
+  await svc.recordInvoice(K, 'B', { attachmentId: '10', amount: '200.00' });
+  assert.equal((await svc.load(K)).duplicate.sameFile, 'PO-9');
+  await svc.releaseClaim(K, 'ADMIN');
+  assert.equal((await svc.load('PO-9')).invoice, null);
+  assert.equal((await svc.load('PO-9')).supplierApproval, null);
+  assert.equal((await svc.load(K)).duplicate.sameFile, null);
+  await svc.approveInvoice(K, 'S');
+
+  f.store.clear(); f.files.clear();
+  await readyToPay(); // PO-1 is paid with its own invoice; a copy on PO-5 cannot release it
+  await svc.requestPayment(K, 'B');
+  await svc.setup('PO-5', 'B', order);
+  f.files.set('PO-5', [{ id: '55', filename: 'again.pdf', bytes: 'invoice 200.00' }]);
+  await svc.recordInvoice('PO-5', 'B', { attachmentId: '55', amount: '200.00' });
+  await assert.rejects(svc.releaseClaim('PO-5', 'ADMIN'), /already paid/);
+});

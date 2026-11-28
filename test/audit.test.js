@@ -64,15 +64,18 @@ test('DUP-1: two orders, same supplier and amount, paid at the same moment: the 
   assert.notDeepEqual([a.verdict, b.verdict], ['CLEARED', 'CLEARED']);
 });
 
-test('DUP-2: the same invoice file recorded on two orders at the same moment: one must be DUPLICATE_INVOICE', async () => {
+test('DUP-2 (updated for A6): the same file on two orders: both are warned, and of two approvals at the same moment only one wins', async () => {
   for (const k of ['PO-1', 'PO-2']) await svc.setup(k, 'B', order);
   f.files.set('PO-1', [{ id: '10', filename: 'a.pdf', bytes: 'same invoice' }]);
   f.files.set('PO-2', [{ id: '11', filename: 'b.pdf', bytes: 'same invoice' }]);
-  let first = true; // the first inv: read comes back a little late (normal network latency)
+  await svc.recordInvoice('PO-1', 'B', { attachmentId: '10', amount: '200.00' });
+  await svc.recordInvoice('PO-2', 'B', { attachmentId: '11', amount: '200.00' });
+  assert.deepEqual((await svc.load('PO-2')).duplicate.alsoOn, ['PO-1']);
+  let first = true; // the first claim read comes back late (normal network latency)
   f.kvs.get = async (k) => { const v = await orig.get(k); if (k.startsWith('inv:') && first) { first = false; for (let i = 0; i < 30; i++) await tick(); } return v; };
-  await Promise.all([svc.recordInvoice('PO-1', 'B', { attachmentId: '10', amount: '200.00' }), svc.recordInvoice('PO-2', 'B', { attachmentId: '11', amount: '200.00' })]);
-  const flagged = [(await svc.load('PO-1')).duplicate.sameFile, (await svc.load('PO-2')).duplicate.sameFile].filter(Boolean);
-  assert.equal(flagged.length, 1);
+  const results = await Promise.allSettled([svc.approveInvoice('PO-1', 'S'), svc.approveInvoice('PO-2', 'S')]);
+  assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
+  assert.match(results.find((r) => r.status === 'rejected').reason.message, /already approved on PO-/);
 });
 
 // ---------- A4: demo mode ----------
